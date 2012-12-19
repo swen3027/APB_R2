@@ -1,0 +1,53 @@
+#include <stdlib.h>
+#include "FreeRTOS.h"
+#include "FreeRTOSConfig.h"
+#include "task.h"
+#include "queue.h"
+#include "RDB1768.h"
+#include "LPC17xx.h"
+/*
+#include "pwm.h"
+#include "ssp.h"
+#include "uart0.h"
+#include "pin_ops.h"
+#include "timer.h"
+#include "apbio.h"
+#include "apbconfig.h"
+#include "apbtypes.h"
+#include "efs.h"
+#include "ls.h"
+#include "mkfs.h"
+#include "tinysh.h"*/
+#define CMDSIZE 2
+
+/*START FUNCTION DESCRIPTION
+**_init				<main.c>
+**SYNTAX:			_init(void)
+**KEYWORDS:			initialization routine startup configuration
+**DESCRIPTION:			Called from startup_LPC17xx.s before main() is called.
+				Sets up CPU Clock, PLL, Direction and any other
+				peripherials
+**RETURN VALUE:			void
+**NOTES:			Executed before main(). 
+*/
+void _init()
+{
+	//Settings for 100MHz
+	CCLK_FREQ = SystemInit(0x01, 74, 5, 2);
+//	LPC_GPIO1->FIODIR |= LED2|LED3|LED4|LED5;	
+//	LPC_GPIO1->FIODIR |= OP1|OP2|OP4|CS;
+	LPC_PINCON->PINSEL3 |= (1 << 22) ;  // CLKOUT pin selection	
+}
+void vTempTask()
+{
+	for(;;);
+}
+int main(void) 
+{
+
+	xTaskCreate(vTempTask, "temp", 240, NULL, 0, NULL);
+	vTaskStartScheduler();
+	for(;;);
+}
+
+
