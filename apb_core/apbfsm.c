@@ -25,16 +25,18 @@ RETURN VALUE:  None
 Notes:			Prototype in apbfsm.h
 END DESCRIPTION ********************************************************* */
 void fsm_main(void){
-//   CreateVariableTimer();  //Multi-purpose software timer
-//	CreateTimeoutTimer();   //Walk Timeout software timer
+	CreateVariableTimer();  //Multi-purpose software timer
+	CreateTimeoutTimer();   //Walk Timeout software timer
    while(1){
       GetConfig();   // Get Station Configuration
 	   GetStatus();   // Get phase and station status
 #ifdef FSM_LEDONWALK
       if(PhaseState == P_WALK)
-         APB_SetIO(LED);
+        SetPin(APB_LED_PORT, APB_LED_INDEX); 
+//	APB_SetIO(LED);
       else
-         APB_ClrIO(LED);
+	ClrPin(APB_LED_PORT, APB_LED_INDEX);  
+//       APB_ClrIO(LED);
 #endif /* FSM_LEDONWALK */
       FSMState = GoNextState(); // Advance to next states
    }

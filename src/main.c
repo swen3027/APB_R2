@@ -11,6 +11,7 @@
 #include "sd.h"
 #include "ff.h"
 //#include "diskio.h"
+#include "apbio.h"
 #include "apbconfig.h"
 #include "audio.h"
 
@@ -102,6 +103,7 @@ void _init()
 	SystemCoreClock = CCLK_FREQ;
 	LPC_GPIO1->FIODIR |= LED2|LED3|LED4|LED5;	
 	LPC_GPIO1->FIODIR |= OP1|OP2|OP4;
+	LPC_GPIO0->FIODIR &= ~(1 << 0);
 	LPC_PINCON->PINSEL3 |= (1 << 22) ;  // CLKOUT pin selection	
 	UART0_Init(115200);
 	MESSAGE("Initalizing timers\n\r");
@@ -135,12 +137,8 @@ int main(void)
 {
 	int retval = 0;
 	apb_station_config_t sc;
-	initTimer3(); //For FDW time measurement
+
 	
-	IO_t led3;
-	led3.BaseReg = LPC_GPIO1;
-	led3.Pin = LED3;
-	APB_ToggleIO(led3);	
 	while(1); //Struct-type IO identification test
 
 	retval = f_mount(0, &Fatfs[0]);

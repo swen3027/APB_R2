@@ -7,9 +7,6 @@
 #define LED 0x20
 #define MUTE 0x40
 void BSP_Init( void );
-void APB_SetIO( int Value );
-void APB_ClrIO( int Value );
-void APB_ToggleIO( int Index );
 void CommReset( void );
 void apbio_reloadexptime( void );
 void enablebutton( void );

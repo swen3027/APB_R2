@@ -7,13 +7,28 @@
 Revisions
 
 ******************************************************************************/
+/**
+*	@file apbio.c
+*	@author Ben Sprague, changed by Kyle Swenson
+*	@brief Contains functions used by APB state machine to control the APB I/O
+*	@date 31 March 2011, revised 18 Dec 2012
+*/
 #include "FreeRTOS.h"
 #include "FreeRTOSConfig.h"
 #include "timers.h"
 #include "apbfsmio.h"
 #include "timer3.h" //FDW time measurement
+#include "pin_ops.h" //Pin operations
 #include <stdio.h>
 
+#define APB_BUTTON_PORT 0 //Set actual button port and index
+#define APB_BUTTON_INDEX 0
+
+#define APB_LED_PORT 0
+#define APB_LED_INDEX 0
+
+#define APB_VIB_PORT 0
+#define APB_VIB_INDEX 0
 // External variables for mode/state/inputs with initial values.
 apb_mode_t Mode = M_DEFAULT;
 apb_beaconmode_t BeacMode = M_NOBEAC;
@@ -22,303 +37,330 @@ apb_phasestate_t PhaseState = P_DONTWALK;
 apb_phasecall_t PhaseCall = P_NOCALL;
 apb_buttonstate_t ButtonState = B_NOPRESS;
 
-int ExtraPress = 0;                 //Extra Press option
-int EP_SecondDW = 0;                //Count DW's seen in Extra Press
-int VarTimerDone = 0;               //Variable software timer expired
-int MessageComplete = 0;            //Audio message completed
-apb_audiostate_t AudioMessage = A_OFF;  //Current audio message
-int Timeout = 0;                    //Walk timeout
-int RepeatWaitDone = 0;             //Time between repeated wait messages done
-int RepeatWaitEnabled = 0;          //Repeated wait enabled
-int VariableCounter;                //Multi-purpose counter
-int BeacEnable;                     //Enable init or dest beacon
-int GroupCallOn = 0;                //Group Call option
-int VibPulseOn = 0;                 //Vibrotactile Call Pulse option
-apb_recall_t RecallMode = R_OFF;        //Recall mode
-int Destination = 0;                //Destination beacon
-uint32_t t;                           //Used for time measurement
-int FDW_Time;                       //Record time in FlashingDW
-int Timing = 0;                     //Show if currently measuring FDW period
-int AudibleCountdown = 0;           //Audible countdown enabled
+int ExtraPress = 0;                 /**<Extra Press option*/
+int EP_SecondDW = 0;                /**<Count DW's seen in Extra Press*/
+int VarTimerDone = 0;               /**<Variable software timer expired*/
+int MessageComplete = 0;            /**<Audio message completed*/
+apb_audiostate_t AudioMessage = A_OFF;  /**<Current audio message*/
+int Timeout = 0;                    /**<Walk timeout*/
+int RepeatWaitDone = 0;             /**<Time between repeated wait messages done*/
+int RepeatWaitEnabled = 0;          /**<Repeated wait enabled*/
+int VariableCounter;                /**<Multi-purpose counter*/
+int BeacEnable;                     /**<Enable init or dest beacon*/
+int GroupCallOn = 0;                /**<Group Call option*/
+int VibPulseOn = 0;                 /**<Vibrotactile Call Pulse option*/
+apb_recall_t RecallMode = R_OFF;        /**<Recall mode*/
+int Destination = 0;                /**<Destination beacon*/
+uint32_t t;                           /**<Used for time measurement*/
+int FDW_Time;                       /**<Record time in FlashingDW*/
+int Timing = 0;                     /**<Show if currently measuring FDW period*/
+int AudibleCountdown = 0;           /**<Audible countdown enabled*/
 
 static int FDWInRange( int prevtime , int currtime , int tolerance );
 
 #ifndef FSMTesting
-xTimerHandle VARIABLETIMER, TIMEOUTTIMER;
-//OS_TIMER VARIABLETIMER;
-//OS_TIMER TIMEOUTTIMER;
+xTimerHandle VARIABLETIMER; /**< FreeRTOS timer handle for a variable length timer*/
+xTimerHandle TIMEOUTTIMER; /**< FreeRTOS timer handle for a time out timer*/
 
-/* START FUNCTION DESCRIPTION ********************************************
-GetConfig
-DESCRIPTION:	Check the station configuration and set the
-                  appropriate fsm variables
-Parameter:		 None
-RETURN VALUE:   None
-Notes:			Prototype in apbio.h
-END DESCRIPTION ********************************************************* */
+/**
+*	This function checks the station configuration and sets the appropriate FSM variables
+*	@author Ben Sprague
+*
+*/
 void GetConfig(void){
       // Check AAPS Mode
-   if(StationConfig.Mode == DEFAULT){
-      Mode = M_DEFAULT;
-   }
-   else if(StationConfig.Mode == APS){
-      Mode = M_EPAPS;
-   }
-   else if(StationConfig.Mode == IDENT){
-      Mode = M_IDENT;
-   }
-   else{
-      Mode = M_OFF;
-   }
+	if(StationConfig.Mode == DEFAULT)
+	{
+		Mode = M_DEFAULT;
+	}
+	else if(StationConfig.Mode == APS)
+	{
+		Mode = M_EPAPS;
+   	}
+   	else if(StationConfig.Mode == IDENT)
+	{
+      		Mode = M_IDENT;
+   	}
+   	else
+	{
+      		Mode = M_OFF;
+   	}
+      	// Check Beaconing Mode
+   	if(StationConfig.Beacon_mode == PING_PONG )
+	{
+      		BeacMode = M_PINGPONG;
+   	}
+   	else if(StationConfig.Beacon_mode == TARGET)
+	{
+      		BeacMode = M_TARGET;
+   	}
+   	else
+	{
+      		BeacMode = M_NOBEAC;
+   	}
 
-      // Check Beaconing Mode
-   if(StationConfig.Beacon_mode == PING_PONG ){
-      BeacMode = M_PINGPONG;
-   }
-   else if(StationConfig.Beacon_mode == TARGET){
-      BeacMode = M_TARGET;
-   }
-   else{
-      BeacMode = M_NOBEAC;
-   }
+      	// Check for Extra Press option
+ 	if(StationConfig.Exp)
+	{
+      		ExtraPress = 1;
+   	}
+   	else
+	{
+      		ExtraPress = 0;
+   	}
 
-      // Check for Extra Press option
-   if(StationConfig.Exp){
-      ExtraPress = 1;
-   }
-   else{
-      ExtraPress = 0;
-   }
+      	// Check for Repeated Wait Message option
+   	if(StationConfig.Repeat_Wait == 0)
+	{
+      		RepeatWaitEnabled = 0;
+   	}
+   	else
+	{
+      		RepeatWaitEnabled = 1;
+   	}
 
-      // Check for Repeated Wait Message option
-   if(StationConfig.Repeat_Wait == 0){
-      RepeatWaitEnabled = 0;
-   }
-   else{
-      RepeatWaitEnabled = 1;
-   }
+      	// Check for Group Call option
+   	if(StationConfig.GroupCall)
+	{
+      		GroupCallOn = 1;
+   	}
+   	else
+	{
+      		GroupCallOn = 0;
+   	}
 
-      // Check for Group Call option
-   if(StationConfig.GroupCall){
-      GroupCallOn = 1;
-   }
-   else{
-      GroupCallOn = 0;
-   }
+      	// Check for Vib Call Pulse option
+	if(StationConfig.VibPulse)
+	{
+      		VibPulseOn = 1;
+   	}
+   	else
+	{
+      		VibPulseOn = 0;
+   	}
 
-      // Check for Vib Call Pulse option
-   if(StationConfig.VibPulse){
-      VibPulseOn = 1;
-   }
-   else{
-      VibPulseOn = 0;
-   }
-
-      // Check Recall Mode
-   if(StationConfig.Recall == RECALL_PED){
-      RecallMode = R_PED;
-   }
-   else if(StationConfig.Recall == RECALL_APS){
-      RecallMode = R_APS;
-   }
-   else{
-      RecallMode = R_OFF;
-   }
+     	// Check Recall Mode
+   	if(StationConfig.Recall == RECALL_PED)
+	{
+      		RecallMode = R_PED;
+   	}
+   	else if(StationConfig.Recall == RECALL_APS)
+	{
+      		RecallMode = R_APS;
+   	}
+   	else
+	{
+      		RecallMode = R_OFF;
+   	}
 }
+/**
+*	Internal function to check if the FDW signal is within range given a tolerance
+*	@param prevtime Previous time
+*	@param currtime Current time
+*	@param tolerance Tolerance for difference between current and previous time
+*	@author Ben Sprague
+*/
+static int FDWInRange( int prevtime , int currtime , int tolerance )
+{
+	int delta;
+   	delta = prevtime - currtime;
 
-static int FDWInRange( int prevtime , int currtime , int tolerance ){
-   int delta;
-
-   delta = prevtime - currtime;
-
-   if( delta < 0 ){
-      delta = -delta;
-   }
-
-   return( delta <= tolerance );
+   	if( delta < 0 )
+	{
+      		delta = -delta;
+   	}
+	return( delta <= tolerance );
 
 }
-
-/* START FUNCTION DESCRIPTION ********************************************
-GetStatus
-DESCRIPTION:	Check the phase state and call and set the
-                  appropriate fsm variables
-Parameter:		 None
-RETURN VALUE:   None
-Notes:			Prototype in apbio.h
-               Button State is set in apbio.c - button_isr
-END DESCRIPTION ********************************************************* */
-void GetStatus(void){
-      // Check Phase State
-   if(StatusBlock.globalStatus & 0x01){
-      PhaseState = P_PREEMPT;
-   }
-   else if(StationConfig.Phase & StatusBlock.dWalks){ //DW
-      PhaseState = P_DONTWALK;
-      if(Timing){
-		stopTimer3(); //DW - end FDW time measurement
+/**
+*	This function checks the phase state and call and set the appropriate FSM variables.
+*	Button State is set in apbio.c in the button ISR
+*	@author Ben Sprague
+*	
+*/
+void GetStatus(void)
+{
+      	// Check Phase State
+   	if(StatusBlock.globalStatus & 0x01)
+	{
+      		PhaseState = P_PREEMPT;
+   	}
+   	else if(StationConfig.Phase & StatusBlock.dWalks) //DW
+	{ 
+      		PhaseState = P_DONTWALK;
+      		if(Timing)
+		{
+			stopTimer3(); //DW - end FDW time measurement
 	  
-       int prev = FDW_Time;
-		FDW_Time = timer3Value()/10000 - 1; //Convert 100 us to s
+       			int prev = FDW_Time;
+			FDW_Time = timer3Value()/10000 - 1; //Convert 100 us to s
 
-         if( FDWInRange( prev , FDW_Time , 1 ) ){
-            //AudibleCountdown = StationConfig.AudibleCountdown;
-            AudibleCountdown = 1;
-         }
-         else{
-            AudibleCountdown = 0;
-         }
+         		if( FDWInRange( prev , FDW_Time , 1 ) )
+			{
+            			//AudibleCountdown = StationConfig.AudibleCountdown;
+            			AudibleCountdown = 1;
+         		}
+         		else
+			{
+            			AudibleCountdown = 0;
+         		}
 
-         Timing = 0;                   //No longer measuring time
-      }
-   }
-   else if(StationConfig.Phase & StatusBlock.clears){ //FDW
-      PhaseState = P_FLASHINGDW;
-      if(!Timing){
-		resetTimer3();
-		startTimer3(); //Start FDW time measurement
-         Timing = 1;                   //Currently measuring time
-      }
-   }
-   else if(StationConfig.Phase & StatusBlock.walks){ //walk
-      if(Timing){    //If timing in W, end timing but don't record
-		stopTimer3();
-         Timing = 0;
-      }
-    	PhaseState = P_WALK;
-   }
-   else{
-      if(Timing){    //If timing in bad state, end timing but don't record
-		stopTimer3();
-         	Timing = 0;
-      }
-      PhaseState = P_UNKNOWN;
-      /*TODO: this is a bad fix to disabling button in flash. */
-      FSMState = S_IDLE_INIT;
-   }
+         		Timing = 0;                   //No longer measuring time
+      		}
+   	}
+   	else if(StationConfig.Phase & StatusBlock.clears) //FDW
+	{ 
+      		PhaseState = P_FLASHINGDW;
+      		if(!Timing)
+		{
+			resetTimer3();
+			startTimer3(); //Start FDW time measurement
+         		Timing = 1;                   //Currently measuring time
+      		}
+   	}
+   	else if(StationConfig.Phase & StatusBlock.walks) //Walk
+	{
+      		if(Timing)
+		{    //If timing in W, end timing but don't record
+			stopTimer3();
+         		Timing = 0;
+      		}
+    		PhaseState = P_WALK;
+   	}
+   	else
+	{
+      		if(Timing)
+		{    //If timing in bad state, end timing but don't record
+			stopTimer3();
+         		Timing = 0;
+      		}
+      		PhaseState = P_UNKNOWN;
+    		  /*TODO: this is a bad fix to disabling button in flash. */
+      		FSMState = S_IDLE_INIT;
+   	}
 
-      // Check Phase Call
-   if(StationConfig.Group & StatusBlock.apsCalls){
-	   PhaseCall = P_APSCALL;
-   }
-   else if(StationConfig.Phase & StatusBlock.calls){
+      	// Check Phase Call
+  	if(StationConfig.Group & StatusBlock.apsCalls)
+	{
+	   	PhaseCall = P_APSCALL;
+   	}
+   	else if(StationConfig.Phase & StatusBlock.calls)
+	{
 	   PhaseCall = P_CALL;
-   }
-   else{
+   	}
+   	else
+	{
 	   PhaseCall = P_NOCALL;
-   }
+   	}
 }
 
-/* START FUNCTION DESCRIPTION ********************************************
-SendCall
-DESCRIPTION:	Sends a call specified by the APB state machine using
-               SNMP_Trap
-Parameter:		call - the type of call sent by the FSM
-RETURN VALUE:   None
-Notes:			Prototype in apbio.h
-END DESCRIPTION ********************************************************* */
-void SendCall( apb_phasecall_t call ){
-  switch(call)
-  {
-	case P_NOCALL:
-	  break;
-	case P_CALL:
-//TODO	  SNMP_Trap(PEDCALL); //FInd out what SNMP_Trap actually is
-	  break;
-	case P_APSCALL:
-//TODO	  SNMP_Trap(APSCALL); //Find out what SNMP_Trap is
-	  break;
-   	default:
-	  break;
-  }
+/**
+*	This function sends a call specified by the APB state machine using SNMP_Trap
+*	@param call The type of call sent by FSM
+*	@author Ben Sprague
+*/
+void SendCall( apb_phasecall_t call )
+{
+	switch(call)
+  	{
+		case P_NOCALL:
+	 	break;
+		case P_CALL:
+			//TODO	  SNMP_Trap(PEDCALL); //FInd out what SNMP_Trap actually is
+	  	break;
+		case P_APSCALL:
+			//TODO	  SNMP_Trap(APSCALL); //Find out what SNMP_Trap is
+	  	break;
+   		default:
+	  	break;
+  	}
 }
 
-/* START FUNCTION DESCRIPTION ********************************************
-SetLed
-DESCRIPTION:	Turns the APB LED on or off depending on the value specified
-               by the APB state machine.
-Parameter:		led - the value specified by the FSM (either ON or OFF)
-RETURN VALUE:   None
-Notes:			Prototype in apbio.h
-END DESCRIPTION ********************************************************* */
-void SetLed( apb_ledstate_t led ){
+/**
+*	Turns the APB LED on or off depending on the value specified by the APB FSM
+*	@param led The value specified by the FSM (either ON or OFF)
+*	@author Ben Sprague
+*/
+
+void SetLed( apb_ledstate_t led )
+{
 #ifndef FSM_LEDONWALK
-  switch(led)
-  {
-	case LED_OFF:
-//TODO	  APB_ClrIO(LED); //Replace with actual IO function
-	  break;
-	case LED_ON:
-//TODO	  APB_SetIO(LED); //Replace with actual IO function
-	  break;
-  }
+	switch(led)
+  	{
+		case LED_OFF:
+			ClrPin(APB_LED_PORT, APB_LED_INDEX);
+	  	break;
+		case LED_ON:
+			SetPin(APB_LED_PORT, APB_LED_INDEX);
+	  	break;
+  	}
 #endif
 }
 
-/* START FUNCTION DESCRIPTION ********************************************
-SetVib
-DESCRIPTION:	Turns the APB vibration on or off depending on the value
-               specified by the APB state machine.
-Parameter:		vib - the value specified by the FSM (either ON or OFF)
-RETURN VALUE:   None
-Notes:			Prototype in apbio.h
-END DESCRIPTION ********************************************************* */
-void SetVib( apb_vibstate_t vib ){
-  switch(vib)
-  {
-	case VIB_OFF:
-//TODO	  APB_ClrIO(VIB);
-     // Wait and then enable the button.
-//TODO     OS_Delay( 1 );
-//TODO     enablebutton(); //Enables button ISR
-	  break;
-	case VIB_ON:
-      // Disable the button isr to prevent false calls.
-//TODO      disablebutton(); //Disabled button ISR
-//TODO      APB_SetIO(VIB);
-	  break;
-  }
+/**
+*	Turns the APB vibration on or off depending on the value specified by the APB state machine.  Also enables/disabled the button ISR.
+*	@author Ben Sprague
+*	@param vib The value specified by the FSM (either ON or OFF)
+*/
+void SetVib( apb_vibstate_t vib )
+{
+  	switch(vib)
+  	{
+		case VIB_OFF:
+			ClrPin(APB_VIB_PORT, APB_VIB_INDEX);
+     			// Wait and then enable the button.
+			//TODO     OS_Delay( 1 );
+			//TODO     enablebutton(); //Enables button ISR
+	  	break;
+		case VIB_ON:
+      			SetPin(APB_VIB_PORT, APB_VIB_INDEX);
+			// Disable the button isr to prevent false calls.
+			//TODO      disablebutton(); //Disabled button ISR
+	  	break;
+  	}
 }
 
-/* START FUNCTION DESCRIPTION ********************************************
-SetAudio
-DESCRIPTION:	Sets the APB audio depending on the value specified by the
-               APB state machine.
-Parameter:		audio - the type of audio sent by the FSM
-RETURN VALUE:   None
-Notes:			Prototype in apbio.h
-END DESCRIPTION ********************************************************* */
-void SetAudio( apb_audiostate_t audio ){
+/**
+*	Sets the APB audio depending on the value specified by the APB state machine
+*	@param audio The type of audio sent by the FSM
+*	@author Ben Sprague
+*/
+void SetAudio( apb_audiostate_t audio )
+{
 	AudioMessage = audio;
-//TODO	OS_SignalEvent( AUDIOTASK_E_RELOAD , &AudioTask ); // Play Locator message
+	//TODO	OS_SignalEvent( AUDIOTASK_E_RELOAD , &AudioTask ); // Play Locator message
 }
 
-/* START FUNCTION DESCRIPTION ********************************************
-GetStationID
-DESCRIPTION:    Returns the station's ID number, so that the
-				state machine can run independently of I/O for
-				software testing
-Parameter:      None
-RETURN VALUE:   None
-Notes:                  Prototype in apbio.h
-END DESCRIPTION ********************************************************* */
+/**
+*	Returns the station's ID number, so that the state machine can run independently of I/O for software testing
+*/
 int GetStationID(void)
 {
-  return StationConfig.ID;
+	return StationConfig.ID;
 }
-
+/**
+*	Callback function for the variable timer, called when the variable timer expires
+*	@author Kyle Swenson
+*	@param xTimer Handle to timer (Not used, included to fit FreeRTOS function prototype)
+*/
 void VariableTimer(xTimerHandle xTimer) //changed to fit FreeRTOS function prototype
 {
-   VarTimerDone = 1;
+	VarTimerDone = 1;
 }
-
+/**
+*	Callback function for the Timeout timer, called when the timeout timer expires
+*	@author Kyle Swenson
+*	@param xTimer Handle to timer (Not used, included to fit FreeRTOS function prototype)
+*/
 void TimeoutTimer(xTimerHandle xTimer)
 {
    if(StationConfig.WalkTimeout > 0)
 	   Timeout = 1;
    //Never time out if WalkTimeout is negative
 }
-
+/**
+*	This function creates a FreeRTOS software timer for the variable timer, intially set to a 1 second period.  The timer does not reload when it expires
+*/
 void CreateVariableTimer()
 {
 //   OS_CreateTimer(&VARIABLETIMER, VariableTimer, 1000); //Initial 1 sec period
@@ -329,7 +371,9 @@ void CreateVariableTimer()
 				VariableTimer); //Callback function	
 
 }
-
+/**
+*	This function creates a FreeRTOS software timer for the timeout timer, initially set to StationConfi.WalkTimeout.  The timer does not reload when it expires
+*/
 void CreateTimeoutTimer()
 {
 //   OS_CreateTimer(&TIMEOUTTIMER, TimeoutTimer, StationConfig.WalkTimeout);
@@ -339,7 +383,10 @@ void CreateTimeoutTimer()
 				2,
 				TimeoutTimer);
 }
-
+/**
+*	This function restarts the variable timer after changing the length of the timer
+*	@param timer Specifies the length of the timer.  Valid values are T_ONESEC, T_HALFSEC, T_MS200 and T_MS100
+*/
 void RestartVariableTimer(apb_variabletimer_t timer)
 {
    VarTimerDone = 0;
@@ -371,7 +418,9 @@ void RestartVariableTimer(apb_variabletimer_t timer)
 		MESSAGE("Failure to start the variable timer, apbfsmio.c:366\n\r"); 
 //OS_RetriggerTimer(&VARIABLETIMER);
 }
-
+/**
+*	This function restarts the time out timer to the StationConfig.WalkTimeout, but only if StationConfig.WalkTimeout is positive or zero.  If it isn't positive or zero, it is handled in the timer function (?)
+*/
 void RestartTimeoutTimer()
 {
 	Timeout = 0;
@@ -388,14 +437,18 @@ void RestartTimeoutTimer()
 	
 //	 OS_RetriggerTimer(&TIMEOUTTIMER);
 }
-
+/**
+*	This function stops the variable timer
+*/
 void StopVariableTimer()
 {
 //	OS_StopTimer(&VARIABLETIMER);
 	if(xTimerStop(VARIABLETIMER, 0) == pdFAIL)
 		MESSAGE("Failure to stop the variable timer, apbfsmio.c:391\n\r");
 }
-
+/**
+*	 This function stops the timeout timer
+*/
 void StopTimeoutTimer()
 {
 	

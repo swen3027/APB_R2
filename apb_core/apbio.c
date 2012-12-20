@@ -11,16 +11,11 @@ Purpose : BSP interface for University of Idaho APB V2 board
 --------  END-OF-HEADER  ---------------------------------------------
 */
 
-#include <RTOS.h>
+#include "FreeRTOS.h"
+#include "FreeRTOSConfig.h"
 #include "apbio.h"
-#include "pinsel.h"
-#include "gpio.h"
-#include "scs.h"
+#include "pin_ops.h"
 #include "apbconfig.h"
-#include "timer.h"
-#include "vic.h"
-#include "pconp.h"
-#include "tasks.h"
 #include "apbfsm.h"
 
 /*********************************************************************
@@ -53,120 +48,71 @@ Purpose : BSP interface for University of Idaho APB V2 board
 
 #define TIMER2_PRESCALE 11999
 
-static void timer2_init( void );
-static void button_isr( void );
-static void timer2_isr( void );
-static void button_init( void );
+///TODO: Replace with button stuff static void timer2_init( void );
+//static void button_isr( void );
+//static void timer2_isr( void );
+//static void button_init( void );
 
+//Board Support Package
 void BSP_Init( void ) {
-	/* Set GPIO mode to use the fast GPIO registers */
-	SCS |= SCS_GPIO_FAST;
-
-	/* Set P2.0-7 as outputs for the LEDs*/
-	FIODIR2 |= FIODIR_OUTPUT( APB_LED0_INDEX );
-	FIODIR2 |= FIODIR_OUTPUT( APB_LED1_INDEX );
-	FIODIR2 |= FIODIR_OUTPUT( APB_LED2_INDEX );
-	FIODIR2 |= FIODIR_OUTPUT( APB_LED3_INDEX );
-	FIODIR2 |= FIODIR_OUTPUT( APB_LED4_INDEX );
-	FIODIR2 |= FIODIR_OUTPUT( APB_LED5_INDEX );
-	FIODIR2 |= FIODIR_OUTPUT( APB_LED6_INDEX );
-
-	/* Set up GPIO for the APB things. */
-	FIODIR0 &= FIODIR_INPUT( APB_BUTTON_INDEX );
-
-	FIODIR0 |= FIODIR_OUTPUT( APB_LED_INDEX );
-	FIODIR0 |= FIODIR_OUTPUT( APB_VIB_INDEX );
-	FIODIR0 |= FIODIR_OUTPUT( APB_MUTE_INDEX );
-	FIODIR0 |= FIODIR_OUTPUT( APB_REMBUTT_INDEX );
-	FIODIR0 |= FIODIR_OUTPUT( APB_RESETOUT_INDEX );
-
-	/* Remove pullup/downs from output pins*/
-	PINMODE1 &= PINMODE1_P0_17_CLEAR;
-	PINMODE1 &= PINMODE1_P0_18_CLEAR;
-	PINMODE1 &= PINMODE1_P0_20_CLEAR;
-	PINMODE1 &= PINMODE1_P0_21_CLEAR;
-	PINMODE1 &= PINMODE1_P0_22_CLEAR;
-
-	PINMODE1 |= PINMODE1_P0_17_FLOAT;
-	PINMODE1 |= PINMODE1_P0_18_FLOAT;
-	PINMODE1 |= PINMODE1_P0_20_FLOAT;
-	PINMODE1 |= PINMODE1_P0_21_FLOAT;
-	PINMODE1 |= PINMODE1_P0_22_FLOAT;
 
 	/* Set MUTE high */
-	FIOSET0 = FIOSET_SET( APB_MUTE_INDEX );
+//TODO	FIOSET0 = FIOSET_SET( APB_MUTE_INDEX );
 
 	/* Set RESETOUT high */
-	FIOSET0 = FIOSET_SET( APB_RESETOUT_INDEX );
+//TODO	FIOSET0 = FIOSET_SET( APB_RESETOUT_INDEX );
 
 	/* LED high (off ) */
-	FIOSET0 = FIOSET_SET( APB_LED_INDEX );
+//TODO	FIOSET0 = FIOSET_SET( APB_LED_INDEX );
 
-	button_init();
-}
-
-void APB_SetIO(int Value) {
-  FIO0SET2 =  ( Value);
-
-}
-
-void APB_ClrIO(int Value) {
-  FIO0CLR2 = ( Value);
-
-}
-void APB_ToggleIO(int Index) {
-  if ((FIO0PIN2) & (Index)) {
-    APB_ClrIO(Index);
-  } else {
-    APB_SetIO(Index);
-  }
+//TODO	button_init();
 }
 
 void CommReset( void ){
-	FIO0CLR2 = NOTRESET;
-	OS_Delay( 100 );
-	FIO0SET2 = ( FIO0PIN2 | NOTRESET );
-	OS_Delay( 500 );	
+//	FIO0CLR2 = NOTRESET;
+//	OS_Delay( 100 );
+//	FIO0SET2 = ( FIO0PIN2 | NOTRESET );
+//	OS_Delay( 500 );	
 }
 
 
 static void button_init( void ){
 
 	// Enable falling edge interrupt
-	IO0IntEnF |= APB_BUTTON_MASK;
+//	IO0IntEnF |= APB_BUTTON_MASK;
 
 	/* Clear out any old interrupts */
-	IO0IntClr = APB_BUTTON_MASK;
+//	IO0IntClr = APB_BUTTON_MASK;
 
 	// Initialize button press timer
-	timer2_init();
+//	timer2_init();
 
-	OS_ARM_InstallISRHandler( VIC_INDEX_EINT3 , &button_isr );
-	OS_ARM_ISRSetPrio( VIC_INDEX_EINT3 , INT_EINT3_PRIO );
-	OS_ARM_EnableISR( VIC_INDEX_EINT3 );
+//	OS_ARM_InstallISRHandler( VIC_INDEX_EINT3 , &button_isr );
+//	OS_ARM_ISRSetPrio( VIC_INDEX_EINT3 , INT_EINT3_PRIO );
+//	OS_ARM_EnableISR( VIC_INDEX_EINT3 );
 
 }
 
 void disablebutton( void ){
 
    // Disable the interrupt.
-   IO0IntEnF &= ~APB_BUTTON_MASK;
+//   IO0IntEnF &= ~APB_BUTTON_MASK;
 
    // Clear any pending interruupts.
-   IO0IntClr |= APB_BUTTON_MASK;
+  // IO0IntClr |= APB_BUTTON_MASK;
 }
 
 void enablebutton( void ){
 
    // Clear any pending interruupts.
-   IO0IntClr |= APB_BUTTON_MASK;
+ //  IO0IntClr |= APB_BUTTON_MASK;
 
    // Enable the interrupt.
-   IO0IntEnF |= APB_BUTTON_MASK;
+ //  IO0IntEnF |= APB_BUTTON_MASK;
 }
 
 static void button_isr( void ){
-	OS_EnterInterrupt();
+/*	OS_EnterInterrupt();
 
 	if( IO0IntEnStatF & APB_BUTTON_MASK ){
 		// Falling edge of button
@@ -206,9 +152,10 @@ static void button_isr( void ){
 	IO0IntClr |= APB_BUTTON_MASK;
 
 	OS_LeaveInterrupt();
+*/
 }
 static void timer2_init( void ){
-	// Protect code from being interrupted
+/*	// Protect code from being interrupted
    OS_IncDI();
 
    // Power up timer2
@@ -236,23 +183,24 @@ static void timer2_init( void ){
 	OS_ARM_EnableISR( VIC_INDEX_TIMER2 );
 
    OS_DecRI();
+*/
 }
 
 void apbio_reloadexptime( void ){
-   TIMER_MR0( TIMER2 ) = StationConfig.EXP_Time;
+//   TIMER_MR0( TIMER2 ) = StationConfig.EXP_Time;
 }
 static void timer2_isr( void ){
-   OS_EnterInterrupt();
+ //  OS_EnterInterrupt();
 
    // Clear interrupt
-   TIMER_IR( TIMER2 ) = TIMER_IR_MR0;
+ //  TIMER_IR( TIMER2 ) = TIMER_IR_MR0;
    // Diasble timer2
-   timer_disable( TIMER2 );
+//   timer_disable( TIMER2 );
    // Disable risinge edge button interrupt
-   IO0IntEnR &= ~APB_BUTTON_MASK;
+ //  IO0IntEnR &= ~APB_BUTTON_MASK;
 
 	// Signal that APS call was placed
-   ButtonState = B_LONGPRESS;
+  // ButtonState = B_LONGPRESS;
 
-   OS_LeaveInterrupt();
+  // OS_LeaveInterrupt();
 }

@@ -2,16 +2,31 @@
 #include "FreeRTOSConfig.h"
 #include "apbconfig.h"
 #include "ff.h"
+/** 
+*	@file abpconfig.c
+*	@brief This file contains save and load functions for APB configuration
+*	This file uses the FATFS filesystem to write and read to the SD card, through the SPI protocol.
+*	@author Kyle Swenson
+*	@date 18 DEC 2012
+*
+*
+*/
 
-apb_status_block_t StatusBlock;
-apb_status_block_legacy_t StatusBlockLegacy;
-apb_station_config_t 	StationConfig;
+apb_status_block_t StatusBlock; /**< Needed by apbfsmio.c*/ 
+apb_status_block_legacy_t StatusBlockLegacy; 
+apb_station_config_t 	StationConfig; /**< Structure containing the current station's configuration settings*/
 
-int DontReset;
 
 static void _apbconfig_makedefault( apb_station_config_t* sc );
 
-FIL fp[2];
+/**
+*	This function saves the current APB configuration
+*	@author Kyle Swenson
+*	@param sc Pointer to apb_station_config_t struct that contains the station configuration
+*	@param fileanme Filename of the configuration file to save
+*	@date 18 DEC 2012
+*/
+
 void apbconfig_save( apb_station_config_t* sc , const char* filename )
 {
 
@@ -49,7 +64,13 @@ void apbconfig_save( apb_station_config_t* sc , const char* filename )
 
 	}
 }
-
+/**
+*	This function loads an exisiting APB configuration, and if it's not available, it defines default settings
+*	@author Kyle Swenson
+*	@param sc Pointer to apb_station_config struct that will contain the data from the saved filed
+*	@param filename Const char * containing the filename which holds the configuration values
+*	@date 18 DEC 2012
+*/
 void apbconfig_load( apb_station_config_t* sc , const char* filename ){
 	FIL  fin;
 	int n;
@@ -85,7 +106,12 @@ void apbconfig_load( apb_station_config_t* sc , const char* filename ){
 
 	}
 }
-
+/**
+*	This function defines default settings in the case that no valid file exists
+*	@param sc Pointer to apb_station_config_t struct that will contain the new default configuration
+*	@author Kyle Swenson
+*	@date 18 DEC 2012
+*/
 void _apbconfig_makedefault( apb_station_config_t* sc ){
 	sc->ID = 0;
 	sc->N_mode = 0;
@@ -103,9 +129,9 @@ void _apbconfig_makedefault( apb_station_config_t* sc ){
 	sc->WalkTimeout = 7000;
 	sc->EXP_Time = 1000;
 	sc->Repeat_Wait = 0;
-   sc->GroupCall = 0;
-   sc->Recall = 0;
-   sc->VibPulse = 0;
-   sc->AudibleCountdown = 0;
-   sc->LocatorAGC = 1;
+	sc->GroupCall = 0;
+	sc->Recall = 0;
+	sc->VibPulse = 0;
+	sc->AudibleCountdown = 0;
+	sc->LocatorAGC = 1;
 }

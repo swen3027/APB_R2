@@ -19,8 +19,8 @@ OBJ += build/timer3.o
 #OBJ += build/ssp.o
 OBJ += build/uart0.o 
 OBJ += build/pin_ops.o
-#OBJ += build/timer.o
-#OBJ += build/apbio.o
+OBJ += build/timer.o
+OBJ += build/apbio.o
 #OBJ += build/25PE20VP.o
 OBJ += build/sd.o
 #OBJ += build/audio.o 
@@ -57,7 +57,7 @@ OBJ += build/tasks.o build/list.o build/croutine.o build/port.o build/queue.o bu
 
 #APB FSM
 
-OBJ +=  build/apbconfig.o build/apbfsmio.o #build/apbfsm.o
+OBJ +=  build/apbconfig.o build/apbfsmio.o build/apbfsm.o
 # Linker script
 #LSCRIPT = src/LPC17xx.ld
 
@@ -146,8 +146,8 @@ build/lpc17xx_clkpwr.o: Audio/lpc17xx_clkpwr.c
 #	$(CC) $(CFLAGS) -o $@ $<
 build/pin_ops.o: src/pin_ops.c
 	$(CC) $(CFLAGS) -o $@ $<
-#build/timer.o: src/timer.c
-#	$(CC) $(CFLAGS) -o $@ $<
+build/timer.o: src/timer.c
+	$(CC) $(CFLAGS) -o $@ $<
 #build/apbio.o: src/apbio.c
 #	$(CC) $(CFLAGS) -o $@ $<
 #build/25PE20VP.o: src/25PE20VP.c

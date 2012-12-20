@@ -9,9 +9,9 @@
 #define DEFAULT_IP 0xc0a8000a
 
 typedef struct {
-	int32_t ID;
-	int32_t N_mode;
-	int32_t D_locator_vol;
+	int32_t ID;		/**< Button ID */
+	int32_t N_mode;		/**< Button Mode (CHECK THIS) */
+	int32_t D_locator_vol;  
 	int32_t D_speech_vol;
 	int32_t N_locator_vol;
 	int32_t N_speech_vol;
@@ -67,6 +67,6 @@ extern apb_station_config_t StationConfig;
 extern apb_status_block_t StatusBlock;
 extern apb_status_block_legacy_t StatusBlockLegacy;
 
-extern int DontReset;
+//extern int DontReset;
 
 #endif /* _APBCONFIG_H_ */
