@@ -18,8 +18,11 @@ Revisions
 #include "timers.h"
 #include "apbfsmio.h"
 #include "timer3.h" //FDW time measurement
+#include "timer.h"	//FDW time measurement
 #include "pin_ops.h" //Pin operations
 #include <stdio.h>
+
+#define FDW_TIMER 2 //using timer2 for FDW time measurement
 
 #define APB_BUTTON_PORT 0 //Set actual button port and index
 #define APB_BUTTON_INDEX 0
@@ -174,8 +177,8 @@ static int FDWInRange( int prevtime , int currtime , int tolerance )
 }
 /**
 *	This function checks the phase state and call and set the appropriate FSM variables.
-*	Button State is set in apbio.c in the button ISR
-*	@author Ben Sprague
+*	Button State is set in apbio.c in the button ISR.  Assumes that FDW_TIMER has been initailized prior to this function getting called
+*	@author Ben Sprague, modified by Kyle Swenson
 *	
 */
 void GetStatus(void)
@@ -190,10 +193,10 @@ void GetStatus(void)
       		PhaseState = P_DONTWALK;
       		if(Timing)
 		{
-			stopTimer3(); //DW - end FDW time measurement
-	  
+			//stopTimer3(); //DW - end FDW time measurement
+	  		disableTimerX(FDW_TIMER);
        			int prev = FDW_Time;
-			FDW_Time = timer3Value()/10000 - 1; //Convert 100 us to s
+			FDW_Time = timerXValue(FDW_TIMER)/10000 - 1; //Convert 100 us to s
 
          		if( FDWInRange( prev , FDW_Time , 1 ) )
 			{
@@ -213,8 +216,8 @@ void GetStatus(void)
       		PhaseState = P_FLASHINGDW;
       		if(!Timing)
 		{
-			resetTimer3();
-			startTimer3(); //Start FDW time measurement
+			resetTimerX(FDW_TIMER);
+			enableTimerX(FDW_TIMER); //Start FDW time measurement
          		Timing = 1;                   //Currently measuring time
       		}
    	}
@@ -222,7 +225,7 @@ void GetStatus(void)
 	{
       		if(Timing)
 		{    //If timing in W, end timing but don't record
-			stopTimer3();
+			disableTimerX(FDW_TIMER);
          		Timing = 0;
       		}
     		PhaseState = P_WALK;
@@ -231,7 +234,7 @@ void GetStatus(void)
 	{
       		if(Timing)
 		{    //If timing in bad state, end timing but don't record
-			stopTimer3();
+			disableTimerX(FDW_TIMER);
          		Timing = 0;
       		}
       		PhaseState = P_UNKNOWN;
