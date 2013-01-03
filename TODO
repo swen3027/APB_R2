@@ -1,11 +1,9 @@
 apbfsmio.c
 	1. Make sure Timer 3 actually works for FDW time measurement
 	2. Find out what SNMP_TRAP(PEDCALL)|SNMP_TRAP(APSCALL) is doing
-	3. Install IO functions
-	4. OS_Delay function
-	5. OS_SignalEven(AUDIOTASK_E_RELAOD, & AudioTask); //Plays locator message
-	6. Verify Software Timers
-	7. Change Timer3 functions to use TimerX
+	3. OS_Delay function
+	4. OS_SignalEven(AUDIOTASK_E_RELAOD, & AudioTask); //Plays locator message
+	5. Verify Software Timers
 
 apbio.c
 	1. BSP_init: Should it initialize the whole board?

@@ -15,7 +15,7 @@ OUTPUT = output/lpc17xxtest
 # Make an object file entry for each c file.
 OBJ = build/main.o 
 OBJ += build/timer3.o
-#OBJ += build/pwm.o
+OBJ += build/pwm.o
 #OBJ += build/ssp.o
 OBJ += build/uart0.o 
 OBJ += build/pin_ops.o
@@ -140,8 +140,8 @@ build/i2c.o: Audio/i2c.c
 
 build/lpc17xx_clkpwr.o: Audio/lpc17xx_clkpwr.c
 	$(CC) $(CFLAGS) -o $@ $<
-#build/pwm.o: src/pwm.c
-#	$(CC) $(CFLAGS) -o $@ $<
+build/pwm.o: src/pwm.c
+	$(CC) $(CFLAGS) -o $@ $<
 #build/ssp.o: src/ssp.c
 #	$(CC) $(CFLAGS) -o $@ $<
 build/pin_ops.o: src/pin_ops.c

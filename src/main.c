@@ -14,7 +14,7 @@
 #include "apbio.h"
 #include "apbconfig.h"
 #include "audio.h"
-
+#include "pwm.h"
 #define mainCHECK_DELAY	( ( portTickType ) 5000 / portTICK_RATE_MS )
 /* Task priorities. */
 #define mainUIP_TASK_PRIORITY				( tskIDLE_PRIORITY + 3 )
@@ -32,6 +32,7 @@ DIR dir;
 FIL File[2];
 //BYTE Buff[4096] __attribute__ ((aligned (4)));
 	char file_name[] = "apb_conf.txt";
+
 
 /*
 #include "pwm.h"
@@ -138,8 +139,11 @@ int main(void)
 	int retval = 0;
 	apb_station_config_t sc;
 
-	
-	while(1); //Struct-type IO identification test
+	PWM_Init(999, PWM_CYCLE, PWM_HIGH, (unsigned char) 8);
+	PWM_set(999, PWM_CYCLE, PWM_HIGH);	
+//	long_pulse();
+	disablePWM();
+	while(1); //pwm test
 
 	retval = f_mount(0, &Fatfs[0]);
 	MESSAGE("filesystem f_mount return value: %d\n\r", retval);
