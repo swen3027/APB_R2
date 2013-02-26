@@ -1,290 +1,287 @@
 #include "FreeRTOS.h"
+#include "FreeRTOSConfig.h"
+#include "timers.h"
 #include "task.h"
+#include "semphr.h"
 #include "queue.h"
-#include "LPC17xx.h"
-#include "audio.h"
-#include "i2c.h"
-#include "uart0.h"
 #include "RDB1768.h"
+#include "LPC17xx.h"
+#include "uart0.h"
 #include "ff.h"
-#define ABS(a)	   (((a) < 0) ? -(a) : (a))
+#include "filesystem.h"
+#include "audio.h"
+/**
+*	@file audio.c
+*	@brief This file manages the audio subsystem
+*	This file manages the audio subsystem.  It uses the FatFS filesystem drivers to open an audio file and play the file.  At the time of writing this, it always plays the first file sent to it.  If the same file is sent multiple times, it will fail and block until a system reset occurs
+*	@author Kyle Swenson
+*	@date 26 FEB 2013
+*/
+#define IDLE 0
+#define BUSY 1
+xQueueHandle audioControlQueue = NULL;	/*!< Queue for Audio Control*/
+xQueueHandle audioRXQueue = NULL;	/*!< Queue for Audio Rx*/		
+xSemaphoreHandle audioBusy = NULL;	/*!< Semaphore indicating if the audio subsystem is currently busy*/
+xSemaphoreHandle dmaRequest = NULL;	/*!< Mutex for deferred ISR processing*/	 
+FIL audioFile, fp2;			/*!< File pointers for file handles*/  
+uint32_t receiveAudio[8]; 
+uint32_t audio1[8], audio2[8];		/*!< DMA audio sample memory locations */ 
+uint8_t audioState = IDLE;
+/**
+*	This function initalized pin functions and directions for the UDA1345TS
+*	NOTES:
+*	Initalizes the pins connected to UDA1345TS. 	
+*	UDA1345TS Pin	LPC1768 Pin	Pin Function	Pin Type
+*	MP1, 9		P0.4, 81	MP1		GPIO	
+*	MP5, 20		P0.5, 80	MP5		GPIO, input, OVERFLOW output
+*	DIN, 19		P0.6, 76	I2STX_SDA	I2S Data output
+*	BCK, 16		P0.7, 78	I2STX_CLK	Bit Clock Output
+*	WS, 17		P0.8, 77	I2STX_WS	Word Select Output
+*	DOUT, 18	P0.6, 79	I2SRX_SDA	I2S Data input
+*	SYSCLK, 12	P4.28, 82	I2SRX_MCLK	I2S System Clock
+*	MP2, 13		P1.22, 36	L3MODE		GPIO, L3 CS signal
+*	MP3, 14		P1.20, 34	SSCL		SSP0 SCK
+*	MP4, 15		P1.24, 38	MOSI0		SSP0 MOSI
+*
+*	@author Kyle Swenson
+*	@date	26 FEB 2013
+*/
+void audio_init()
+{	
+	LPC_PINCON->PINSEL0 &= ~((0x03 << 8) | (0x03 <<10) | (0x03 << 12) | (0x03 << 14) | (0x03 << 16) | (0x03 << 18));
+	LPC_PINCON->PINSEL0 |= ( 0x00 << 8) | //GPIO for MP1
+				(0x00 << 10) | //GPIO for MP5
+				(0x01 << 12) | //I2S_RXSDA for DIN
+				(0x01 << 14) | //I2STX_CLK for BCK
+				(0x01 << 16) | //I2STX_WS for WS
+				(0x01 << 18); //I2STX_SDA for DOUT
+	LPC_PINCON->PINSEL9 &= ~((0x03 << 24)|(0x03 << 26));
+	LPC_PINCON->PINSEL9 |= (0x01 << 24)|(0x01 << 26); //RX_MCLK for SYSCLK
+	LPC_PINCON->PINSEL3 &= ~((0x03 << 12)|  //GPIO for L3MODE 
+				(0x03 << 8) | //GPIO for SSCL
+				(0x03 << 16) ); //GPIO for MOSI0;
+	LPC_PINCON->PINSEL3 |= ( 0x03 << 16)|(0x03 << 8) ; //MOSI0 for MOSI0, SCL0;
 
+	LPC_GPIO0->FIODIR |= (1 << 4) | (1 << 5);	//Set Pins P0.4 and P0.5 for input 
+	LPC_GPIO1->FIODIR |= (1 << 22);
 
-extern long int gQ31_Peak_L, gQ31_Peak_R;                              
-extern long int gQ31_Peak[2];                                          
-long int Q31_I2S_Left, Q31_I2S_Right;
-int volume = 0;
-int bass = 0;
-int fon = 1;
-xQueueHandle lineInQueue;
-xQueueHandle audioControl;
-xQueueHandle settings;
-#define MAX_DEPTH 8
-typedef struct {
-	long int left[MAX_DEPTH];
-	long int right[MAX_DEPTH];
-	int depth;
-} lineData;
-/*START FUNCTION DESCRIPTION: AudioReadReg  <audio.c>
-**SYNATX:		uint16_t AudiotReadReg(uint16_t)	
-**PARAMETER1:		Hexadecimal value of register to read
-**KEYWORDS:		Audio read register data
-**DESCRIPTION:		Function reads a register and returns its value
-**RETURN VALUE:		Value of the register 'reg'
-**NOTES:		Uses I2C to read the UDA1380 Registesr
-**END FUNCTION DESCRIPTION*/
-uint16_t AudioReadReg(uint16_t reg)
-{
-	uint32_t i2c_status;
-	uint8_t tx_data[3];
-	uint8_t rx_data[2];
-	char str[128];
-	I2C_TRANSFER_OPT_Type OptType;	
-	I2C_M_SETUP_Type transferConfig;
-	tx_data[0] = reg;
-	transferConfig.sl_addr7bit = UDA1380_ADDR >> 1;
-	transferConfig.tx_data = tx_data;
-	transferConfig.tx_length = 1;
-	transferConfig.rx_data = rx_data;
-	transferConfig.rx_count = 0;
-	transferConfig.rx_length = 2;
-	transferConfig.retransmissions_max = 0xFF;
-	transferConfig.callback = NULL;
-	OptType = I2C_TRANSFER_INTERRUPT;
-	I2C_MasterTransferData(LPC_I2C0,&transferConfig, OptType);
-//	MESSAGE("Register 0x%x data: 0x%x\n\r", reg, (rx_data[0]<<8)| rx_data[1] );	
-	return (rx_data[0] << 8)|rx_data[1];
-}
-/*START FUNCTION DESCRIPTION: vAudioSendCommand	<audio.c>
-**SYNATX:		void vAudioSendCommand(uint16_t, uint32_t)
-**PARAMETER1:		Hex address of register to write to
-**PARAMETER2:		Command to send into the register
-**KEYWORDS:		send command
-**DESCRIPTION:		Writes command 'cmd' into register 'reg
-**RETURN VALUE:		Void
-**NOTES:		Uses I2C to write commands to registers in the UDA1380
-**END FUNCTION DESCRIPTION*/
-void vAudioSendCommand(uint16_t reg, uint32_t cmd)
-{
-
-	uint32_t i2c_status;
-	uint8_t transferData[4];
-	I2C_M_SETUP_Type transferConfig;
-	I2C_TRANSFER_OPT_Type OptType;
-	transferData[0] = reg & 0xFF;
-	transferData[1] = ((cmd >> 8) & 0xFF);
-	transferData[2] = cmd & 0xFF;
-	transferConfig.sl_addr7bit = UDA1380_ADDR>>1;//7 bit addr of device
-	transferConfig.tx_data = transferData;
-	transferConfig.tx_length = 3;
-	transferConfig.tx_count = 0;
-	transferConfig.rx_data = NULL;
-	transferConfig.rx_length = 0;
-	transferConfig.rx_count = 0;
-	transferConfig.retransmissions_max = 0xFF;
-	transferConfig.retransmissions_count = 0;
-	transferConfig.status = 0x00;
-	transferConfig.callback = NULL; //Pointer to callback function when complete
-	OptType = I2C_TRANSFER_INTERRUPT;
-	i2c_status = I2C_MasterTransferData(LPC_I2C0, &transferConfig, OptType); 
-	MESSAGE( "I2C info:\n\r\tretransmission count: 0x%x\n\r\tstatus: 0x%x\n\r", transferConfig.retransmissions_count, transferConfig.status);
 
 }
-/*START FUNCTION DESCRIPTION: vAudioInit	<audio.c>
-**SYNATX:		void vAudioInit(uint32_t, uint32_t, uint32_t, uint32_t, int32_t, int32_t)
-**PARAMETER1:		Peripherial clock divider value for I2S block( 1, 2, 4, 8)
-**PARAMETER2:		I2S Rx and Tx rate multiplier (0 - 255)
-**PARAMETER3:		I2S Rx and Tx rate divider (0 - 255)
-**PARAMETER4:		Sets the Rx and Tx bitrate divider (0 - 31) to produce the bitclock
-**PARAMETER5:		Number of channels desired (1, 2)
-**PARAMETER6:		Sets the bitwidth of the channels (8, 16, 32)	
-**KEYWORDS:		init initialization UDA1380 I2S I2C
-**DESCRIPTION:		This function initalizes the I2C interface, I2S interface, and the UDA1380
-**RETURN VALUE:		void
-**NOTES:		See UM10360 pg 473
-**END FUNCTION DESCRIPTION*/
-void vAudioInit(uint32_t pclkdiv, uint32_t x, uint32_t y, uint32_t tx_bitrate, int32_t nChan, int32_t bw)
+/**
+*	This function initializes the mode control pins for the UDA1345TS.  
+*	
+*	NOTES:	
+*	MC1 is on P2.2, MC1 is on P2.1
+*	MC1|MC2|Function
+*	 0 | 0 | L3MODE
+*	 0 | 1 | TEST
+*	 1 | 0 | TEST
+*	 1 | 1 | Static Pin mode
+*	@author Kyle Swenson
+*	@date 26 FEB 2013
+*/
+void mcp_init(uint8_t static_mode)
 {
-	uint16_t data;
-	volume = 0;
-	LPC_PINCON->PINSEL1 &= ~0x03C00000;
-	LPC_PINCON->PINSEL1 |= (1 << 22) | (1 << 24); //Enable I2C	
-	LPC_PINCON->PINSEL0 &= ~((3 << 14)|(3 << 16)|(3 << 18));
-	LPC_PINCON->PINSEL0 |= (1 << 14)|(1 << 16)|(1 << 18);
-	LPC_SC->PCONP |= (1 << 19); //Power up I2C
-	I2C_Cmd(LPC_I2C0, ENABLE);
-	I2C_Init(LPC_I2C0, 400000);//400 kHz I2C rate
-	I2C_Cmd(LPC_I2C0, ENABLE);
-	LPC_GPIO0->FIODIR |= (1 << 10);//Set direction of Codec reset as output
-	LPC_GPIO0->FIOCLR = (1 << 10); //Reset Codec
-	LPC_GPIO0->FIOSET = (1 << 10); //Bring out of reset
+	LPC_GPIO2->FIODIR |= ( 1 << 2)|(1 << 1);
+	LPC_GPIO2->FIOCLR |= (1 << 2)|(1 << 1);	//SET l3mode
+	if(static_mode)
+		LPC_GPIO2->FIOSET |= (1 << 2)|(1 << 1);	//SET static pin mode
+
+}
+/**START FUNCTION DESCRIPTION
+static_pin_init			<main.c>
+SYNTAX:				void static_pin_init();
+KEYWORDS:			static pin init, initalization
+DESCRIPTION:			Sets static pin modes for all static pins
+RETURN VALUE:			None.
+NOTES:	
+	MP1 is on P0.4
+	MP2 is on P1.22
+	MP3 is on P1.20
+	MP4 is on P1.24
+	MP5 is on P0.5
 	
-	LPC_GPIO0->FIODIR |= (1 << 10);//Set direction of Codec reset as output
-	LPC_GPIO0->FIOCLR = (1 << 10); //Reset Codec
-	LPC_GPIO0->FIOSET = (1 << 10); //Bring out of reset
-	LPC_SC->PCONP |= (1 << 27); //Turn on power to I2S
-	LPC_SC->PCLKSEL1 &= ~(3 << 22); 
-	switch(pclkdiv)
-	{
-		case 1:
-			LPC_SC->PCLKSEL1 |=( 0x01 << 22); 
-			break;
-		case 2:
-			LPC_SC->PCLKSEL1 |=( 0x02 << 22); 
-			break;
-		case 4:
-			LPC_SC->PCLKSEL1 |=( 0x00 << 22); 
-			break;
-		case 8:
-			LPC_SC->PCLKSEL1 |=( 0x03 << 22); //CCLK /8
-			break;
-		default:
-			UART0_PrintString("Bad pclk divsor\n\r");			
-			break;
-	}
-	LPC_PINCON->PINSEL0 |= ( 1 << 14); //P0.7 = I2STX_CLK (the bit clock)
-	LPC_PINCON->PINSEL0 |= (1 << 16); //P0.8 = I2STX_WS (word clock)
-	LPC_PINCON->PINSEL0 |= (1 << 8); //P0.4 = I2SRX_CLK 
-	LPC_PINCON->PINSEL1 |= (2 << 16);//P0.24 = I2SRX_WS
-	LPC_PINCON->PINSEL0 |= (1 << 18); //P0.9 = I2STX_SD (data to codec)
-	LPC_PINCON->PINSEL1 |= (2 << 18); //P0.25 = I2SRX_SD (data from codec)
-	LPC_PINCON->PINSEL9 |= (1 << 24); //P4.28 = RX_MCLK
-	LPC_PINCON->PINSEL9 |= (1 << 26); //P4.29 = TX_MCLK
+	MP1 and MP5 control data input format
+		MP1 | MP5 | Function
+		0	0	MSB-Justified
+		0	1	I2S-Bus
+		1	0	MSB output LSB 20 bit input
+		1	1	MSB output LSB 16 bit input
+	MP2 controls Demphasis and Mute
+		0	No de-emphasis and mute
+		.5VDD	De-emphasis at 44.1kHz
+		1	Mutes
+	MP3 controls system clock frequency
+		0	256Fs
+		1	384Fs
+	MP4 Controls ADC mode
+		0	ADC Power-Down mode
+		.5VDD	6dB gain mode
+		1	0dB gain mode
+*/
+void static_pin_init()
+{
+	LPC_PINCON->PINSEL0 &= ~((3 << 8)|(3 << 10));
+	LPC_PINCON->PINSEL3 &= ~((3 << 8)|(3 << 12)|(3 << 16));
+	LPC_GPIO0->FIODIR = (1 << 4) | (1 << 5);
+	LPC_GPIO1->FIODIR = (1 << 22) | ( 1 << 20) | (1 << 24);
+	LPC_GPIO0->FIOCLR = ( 1 << 4);		//Set I2S Bus as input
+	LPC_GPIO0->FIOSET = (1 << 5);		//Set I2S Bus as input
+	LPC_GPIO1->FIOCLR = (1 << 20) | (1 << 22);
+	LPC_GPIO1->FIOSET = ( 1 << 24)|(1 << 20);// | (1 << 22); //384Fs, ADC in 0dB gain
+}
+/**START FUNCTION DESCRIPTION
+l3init				<main.c>
+SYNTAX:				void l3init()
+KEYWORDS:			L3 bus initalization
+DESCRIPTION:			Initalizes pins and SSP0 for L3 Bus function 
+RETURN VALUE:			None.
+NOTES:	
+	Sets the L3Bus for a 2 MhZ clock, 8 bit data transfer.  
+	The L3Bus has the clock polarity high between frames.
+	The SD card is on the SSP0 bus as well, and uses different parameters.  
+	The SSP0 is first configured here, then reconfigured when the filesystem is mounted.	
+*/
+void l3init()
+{
 	
-	LPC_I2S->I2SRXRATE = ((x & 0xFF) << 8) | (y & 0xFF);
-	LPC_I2S->I2STXRATE = ((x & 0xFF) <<8) | (y & 0xFF);
-	// MCLK for RX
-	LPC_I2S->I2SRXMODE = (1<<3);		//from TX MCLK
-	// MCLK for TX
-	LPC_I2S->I2STXMODE = (1<<3);	// generated
-	// MCLK is 256xFs
-	// Bitclock rate is 64xFs = MCLK/4
-	LPC_I2S->I2STXBITRATE = tx_bitrate & 0x3F;
-	LPC_I2S->I2SRXBITRATE = tx_bitrate;
-	// Codec works in 32-bit per channel mode.
-	switch(bw)
-	{
-		case 8:
-			LPC_I2S->I2SDAI = ( 0x00 ) | ((((nChan * 8)/2)-1)<<6);
-			LPC_I2S->I2SDAO = ( 0x00 ) | ((((nChan * 8)/2)-1)<<6);
-			break;
-		case 16:
-			LPC_I2S->I2SDAI = ( 0x01 ) | ((((nChan * 16)/2)-1)<<6);
-			LPC_I2S->I2SDAO = ( 0x01 ) | ((((nChan * 16)/2)-1)<<6);
-			break;
-		case 32:
-			LPC_I2S->I2SDAI = ( 0x03 ) | ((((nChan * 32)/2)-1)<<6);
-			LPC_I2S->I2SDAO = ( 0x03 ) | ((((nChan * 32)/2)-1)<<6);
-			break;
-		default:
-			MESSAGE("bad bitwidth\n\r");
-			break;
+	LPC_SC->PCLKSEL1 &= ~(0x03 << 10);
+	LPC_SC->PCLKSEL1 |= ( 0x02 << 10); 	//cclk/1
+	LPC_SSP0->CPSR = 50; 			//2 MHz clock
+	LPC_SSP0->CR0 = (0x07) | 		//8 bit data transfer
+			(0x00 << 4) | 		//SPI format
+			(1 << 6) | 		//Clock polarity high between frames
+			(1 << 7) ; 		//
+	LPC_SSP0->CR1 = 0x02;			//Enable SSP
 
-	}
-//	LPC_I2S->I2SDAI = (bw & 0x03) | ( 31 <<6);
-//	LPC_I2S->I2SDAO = (bw & 0x03) | (31<<6);<F9>
-	LPC_I2S->I2SDAO = (7 << 6) | (0x00 << 0) |( 0 << 2);
-	// RESET I2S
-	LPC_I2S->I2SDAO |= (1<<4) | (1<<3);
-	LPC_I2S->I2SDAI |= (1<<4) | (1<<3);
-	LPC_I2S->I2SDAO &= ~((1<<4) | (1<<3) | (1 << 15)| (1 << 5));
-	LPC_I2S->I2SDAI &= ~((1<<4) | (1<<3)| (1 << 5));	
+}	
+void l3SendCmd(uint8_t address, uint8_t data)
+{
+	#define SETL3MODE {LPC_GPIO1->FIOPIN |= (1 << 22);}
+	#define CLRL3MODE {LPC_GPIO1->FIOPIN &= ~(1 << 22);}
+	uint8_t i;
+	LPC_GPIO1->FIOPIN |= (1 << 21);
+	SETL3MODE
+	for(i=0;i<0xFF;i++);
+	CLRL3MODE
+	LPC_SSP0->DR = address;
+	while(LPC_SSP0->SR & (1 << 4));	
+	SETL3MODE
+	CLRL3MODE
+	CLRL3MODE
+	SETL3MODE
+	LPC_SSP0->DR = data;
+	while(LPC_SSP0->SR & (1 << 4));
+	for(i=0;i<0x07;i++);
+	CLRL3MODE
+}	
+
+/**START FUNCTION DESCRIPTION
+uda1345TS_init			<main.c>
+SYNTAX:				void usa1345TS_init()
+KEYWORDS:			L3 bus, UDA1345 L3Bus initalization
+DESCRIPTION:			Uses the L3 Bus to initalize the UDA1345TS
+RETURN VALUE:			None.
+NOTES:				Doesn't work, using static pin mode instead	
+*/
+void uda1345TS_init()
+{
+	l3SendCmd(0b00101000, 0b00000000); //Set volume to max
+	l3SendCmd(0b00101000, 0b00000001); //De-Emphasis and MuTe off
+	l3SendCmd(0b00101000, 0b11000011);	//Power control (Turn everything on)
+	l3SendCmd(0b01101000, 0b00001000);	//384*fs, I2S bus, DC filter
+	l3SendCmd(0b00000000, 0b00000000);	//Send an invalid address	
+}
+
+/* START FUNCTION DESCRIPTION
+I2Sinit					<main.c>
+SYNTAX:		void I2Sinit();
+KEYWORDS:	Init I2S Bus
+DESCRIPTION:	Initializes I2S bus for UDA1345TS communication
+RETURN VALUE:	None
+NOTES:	
+	Sets the I2S Bus for 8 bit samples at 16kHz.  
+	The SYSCLK is operating at 384Fs.
+	The BCLK is operating at 16kHz*8bits/sample*2 channels = 256 kHz
+*/
+void I2Sinit()
+{
+	LPC_SC->PCONP |= (1 << 27);		//Power up
+	LPC_SC->PCLKSEL1 &= ~(0x03 << 22);
+	LPC_SC->PCLKSEL1 |= ( 0x02 << 22); 	//100 MHz clock into I2S subsystem
+	LPC_I2S->I2SDAO = (0x00 << 0)  |	//8 Bit data
+			(0x00 << 2) |		//Stereo data
+			(0x01 << 3) |		//Stop
+			(0x01 << 4) | 		//Reset
+			(0x00 << 5) |		//LPC1768 as master
+			(0x07 << 6) |		//WS period 8
+			(0x01 << 15);		//MUTE
+
+	LPC_I2S->I2SDAI = (0x00 << 0)  | 	// 8 Bit word width
+			(0x00 << 1) | 		//Sereo Data
+			(0x01 << 3) | 		//Stop
+			(0x01 << 4) | 		//Reset
+			(0x00 << 5) | 		//LPC1768 as master
+			(0x07 << 6) ; 		//WS half period 8
+	LPC_I2S->I2STXRATE = (118 << 0) | 	//Y_divider
+				(29 << 8); 	//X_divider
+
+	LPC_I2S->I2SRXRATE = (118 << 0) | 	//Y
+				(29 << 8) ; 	//X
+	LPC_I2S->I2STXBITRATE = 23;
+	LPC_I2S->I2SRXBITRATE = 23;
+	LPC_I2S->I2STXMODE = (0x01 << 0) | 	// Fractional Rate divider clock output as source
+			(0x00 << 2) | 		//Transmit in 4 pin mode = false
+			(0x01 << 3); 		//Enable tx_mclk output
+	LPC_I2S->I2SRXMODE = (0x00 << 0) | 	//Frctional rate divier clk output as source
+			(0x00 << 2) | 		//Transmit in 3 pin mode
+			(0x01 << 3); 		//Enable rx_mclk output
 	
 
-	MESSAGE("Pins and I2S initalized\n\r");
-	//Software reset for the codec	
-	vAudioSendCommand(UDA1380_SW_RESET, 0xFFFF);
-	MESSAGE("UDA1380 Reset\n\r");
-	//Power control--
-	//Turns on Headphone driver, dac, bias network, analog mixer, PGA(L+R) and ADC(L+R)
-	vAudioSendCommand(UDA1380_PWRCTL_02, (PON_PLL|PON_HP|PON_DAC|PON_BIAS|EN_AVC|PON_AVC|PON_PGAL|PON_ADCL|PON_PGAR|PON_ADCR|PON_LNA));	
-	vAudioSendCommand(UDA1380_I2SSET_01, (SFORI_I2S|SFORO_I2S|SIM_SLAVE|SEL_SOURCE_DMIXER));
-	vAudioSendCommand(UDA1380_ANAMIX_03, 0xFFFF);//Analog Mixer settings (muted)
-	vAudioSendCommand(UDA1380_MUTDEM_13,MT1 );
-	vAudioSendCommand(UDA1380_MIXVOL_11, 0xFFFF);
-	vAudioSendCommand(UDA1380_CLKSET_00,EN_DEC|EN_DAC|EN_INT|DAC_CLK|ADC_CLK|WSPLL_6_25); //changed from 12_5
-	vAudioSendCommand(UDA1380_ADCSET_22,  0x04);
-	vAudioSendCommand(UDA1380_PGAMUT_21, 0x00);
-	vAudioSendCommand(UDA1380_TONCTL_12, EQFLAT);
-	vAudioSendCommand(UDA1380_MASVOL_10, 0x1F1F);
-//	vAudioSendCommand(UDA1380_MIXOVS_14, SILENCE);
-	//Input and output control
-	//I2S Bus as input and output, set slave and use digital mixer
-	MESSAGE("Codec Configured\n\r");	
-//	LPC_I2S->I2SIRQ = (1 << 0)| (4 << 8)|(4 << 16); //Enable Recieve interrupt, interrupt when FIFO is 4 levels full
-//	NVIC_EnableIRQ(I2S_IRQn);
-//	MESSAGE("I2S interrupt enabled\n\r");
+}
+/* START FUNCTION DESCRIPTION
+enableI2S					<main.c>
+SYNTAX:		void enableI2S();
+KEYWORDS:	enable I2S
+DESCRIPTION:	Enables the I2S bus (takes it out of mute mode and enables output)
+RETURN VALUE:	None
+NOTES:		None	
+*/
+void enableI2SOutput()
+{
+	LPC_I2S->I2SDAO &= ~((1 << 15) | 	//Disable Mute
+				(1 << 3) | 	//Disable reset
+				(1 << 4));	//Disable stop
+}
+void disableI2SOutput()
+{
+	LPC_I2S->I2SDAO |= ((1 << 15) | 	//Enable Mute
+				(1 << 4));	//Enable stop
 
 }
-void I2S_IRQHandler(void)
+void enableI2SInput()
 {
-	#define I2S_RX_LEVEL 0x00000F00
-	long int left, right;
-	uint32_t data;
-	char str[100];
-	uint8_t i = 0;
-	static last_sample = 0;
-	double sample;
-	portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;	
-	lineData output;
-	output.depth = 0;
-	while( (LPC_I2S->I2SSTATE & I2S_RX_LEVEL) && (output.depth < MAX_DEPTH))
-	{
-		output.left[output.depth] = LPC_I2S->I2SRXFIFO;
-		output.right[output.depth++] = LPC_I2S->I2SRXFIFO;
-	}
-//	xQueueSendFromISR(lineInQueue, &output, &xHigherPriorityTaskWoken);
+	LPC_I2S->I2SDAI &= ~((1 << 3)|(1 << 4));//Disable reset and stop modes
 
-	portEND_SWITCHING_ISR(&xHigherPriorityTaskWoken);
-}
-void vVolumeControl(uint16_t volume)
-{
-	char str[20];
-	vAudioSendCommand(UDA1380_DECVOL_20, volume);	
-	MESSAGE( "0x%x\n\r", volume);
-}
-void vVolumeIncrease()
-{
-	char str[20];
-	volume++;
-	vVolumeControl((uint16_t)volume);	
-	MESSAGE("0x%x\n\r", volume);
-}
-void vVolumeDecrease()
-{
-	volume--;
-	vVolumeControl((uint16_t)volume);
-}
-void vBassIncrease()
-{
-	char str[20];
-	if(bass != 0xF)
-	{
-		bass++;
-	}
-	MESSAGE( "0x%x\n\r", bass);
-	vAudioSendCommand(UDA1380_TONCTL_12, bass<<8|bass);	
-}
-void vBassDecrease()
-{
-	char str[20];
-	if(bass != 0)
-	{
-		bass--;
-	}
-	else
-		bass = 0;
-	MESSAGE( "0x%x\n\r", bass);
-	vAudioSendCommand(UDA1380_TONCTL_12, bass<<8|bass);
-}
-uint32_t makeHex32b(uint8_t b3, uint8_t b2, uint8_t b1, uint8_t b0)
-{
-	return ((b3 << 24) | (b2 << 16) | (b1 << 8) | b0);
 
 }
+void disableI2SInput()
+{
+	LPC_I2S->I2SDAI |= (1 << 4); //enable reset and stop modes
+
+}
+/* START FUNCTION DESCRIPTION
+unsignedtosigned					<main.c>
+SYNTAX:		uint8_t unsignedtosigned(uint8_t us)	
+PARAMETER1:	unsigned 8 bit integer
+KEYWORDS:	convert unsigned 2sC
+DESCRIPTION:	Converts an unsigned 8 bit integer to a 2sC signed 8 bit integer
+RETURN VALUE:	2sC representation of unsigned value  
+NOTES:		None	
+*/
 uint8_t unsignedtosigned(uint8_t us)
 {
-	
+	us = us >> 2;	
 	if(us & 0x80)
 		us &= 0x7F;
 	else
@@ -292,157 +289,420 @@ uint8_t unsignedtosigned(uint8_t us)
 	return us;
 
 }
-void readWaveFile(char * filename)
+
+void SetCh5DMA(uint32_t * array)
 {
-	FIL wave_file;
-	uint8_t wave_header[44];
-	uint8_t sample_rate_str[5];
-	uint8_t i = 0;
-	uint32_t size = 0;
-	uint32_t num_channels;
-	uint32_t sampleRate;
-	uint32_t byteRate;
-	uint32_t blockAlign;
-	uint32_t BitsPerSample;
-	uint32_t dataSize;
-	uint32_t return_value;
-	uint32_t bytes_read = 0;
-	uint32_t dataOut;
-	uint16_t d1, d2;
-	uint8_t test_data;
-	uint8_t out_data;
-	uint8_t direction;
-	uint8_t buffer[1024];
+	LPC_GPDMACH5->DMACCConfig = 0; //Stop Ch5 DMA
+	LPC_GPDMA->DMACIntTCClear |= ( 1 << 5); //Clear Ch5 TC interrupt
 
-	#define UP 0
-	#define DOWN 1
-	test_data = 0;
-	direction = UP;
-	return_value = f_open(&wave_file, filename, FA_READ);
-	if(return_value != FR_OK)
-		MESSAGE("f_open failed with: %u\n\r", return_value);
-	else
-	{
-		return_value = f_read(&wave_file, wave_header, 44, &bytes_read);
-		if(return_value != FR_OK || bytes_read != 44)
-			MESSAGE("f_read failed; return value: %u bytes_read: %u\n\r", return_value, bytes_read);
-		else
-		{
-			if(wave_header[0] == 'R' &&
-				wave_header[1] == 'I' &&
-				wave_header[2] == 'F' &&
-				wave_header[3] == 'F')
-			{
-				MESSAGE("Valid wave file detected\n\r");
-			}	
-			num_channels = wave_header[22];
-			sampleRate = makeHex32b(wave_header[27], wave_header[26], wave_header[25], wave_header[24]);
-			byteRate = makeHex32b(wave_header[31],wave_header[30],wave_header[29],  wave_header[28] );
-			blockAlign = makeHex32b(0,0,wave_header[33], wave_header[32]);
-			BitsPerSample = makeHex32b(0, 0, wave_header[35], wave_header[34]);
-			dataSize = makeHex32b(wave_header[43], wave_header[42], wave_header[41], wave_header[40]);
-			MESSAGE("Audio file information: \n\r\tNumber of channels: %u\n\r\tSample Rate: %u\n\r\tByte Rate: %u\n\r\tNumber of bytes for 1 sample: %u\n\r\tBits per sample: %u\n\r\tData Size: %u\n\r", num_channels, sampleRate, byteRate, blockAlign, BitsPerSample, dataSize);
-			//Set up I2S interface
-			//16 bit data (bw) 1 channel, 	
-			d1 = 0x0000; d2 = 0x0000;
-			while(1)
-			{
-
-				if(!f_eof(&wave_file))
-				{
-					return_value = f_read(&wave_file, buffer, 32, &bytes_read);
-					if(return_value != FR_OK/* || bytes_read != 4*/)
-					{
-						MESSAGE("Error reading wave file data, error is: %u, number of bytes read is: %u\n\r",return_value, bytes_read);
-						MESSAGE("i: %u\n\r", i);
-					}
-					else{
-					for(i = 0; i < 64; i++)
-					{
-						buffer[i] =  unsignedtosigned(buffer[i]); //convert sign...
-					}			
-						while(((LPC_I2S->I2SSTATE & (0x0F << 16))>>16)  );
-			
-					for( i = 3; i < 32; i+=4)
-					{
-					//	while(((LPC_I2S->I2SSTATE & (0x0F << 16))>>16)  );
-				
-						LPC_I2S->I2STXFIFO = (buffer[i] << 24) | (buffer[i-1] << 16) | (buffer[i-2] << 8) | buffer[i-3];
-					//	LPC_I2S->I2STXFIFO = (buffer[i-4] << 24) | (buffer[i-5] << 16) | (buffer[i-6] << 8) | buffer[i-7];
-					//	LPC_I2S->I2STXFIFO = (buffer[i-8] << 24) | (buffer[i-9] << 16) | (buffer[i-10] << 8) | buffer[i-11];
-					//	LPC_I2S->I2STXFIFO = (buffer[i-12] << 24) | (buffer[i-13] << 16) | (buffer[i-14] << 8) | buffer[i-15];
-					//	LPC_I2S->I2STXFIFO = (buffer[i-16] << 24) | (buffer[i-17] << 16) | (buffer[i-18] << 8) | buffer[i-19];
-					//	LPC_I2S->I2STXFIFO = (buffer[i-20] << 24) | (buffer[i-21] << 16) | (buffer[i-22] << 8) | buffer[i-23];
-					///	LPC_I2S->I2STXFIFO = (buffer[i-24] << 24) | (buffer[i-25] << 16) | (buffer[i-26] << 8) | buffer[i-27];
-					//	LPC_I2S->I2STXFIFO = (buffer[i-28] << 24) | (buffer[i-29] << 16) | (buffer[i-30] << 8) | buffer[i-31];
-					
-								
-					}}
-				}
-				else
-				{
-
-					return_value = f_lseek(&wave_file, 44);
-					if(return_value != FR_OK)
-						MESSAGE("f_lseek failed\n\r");
-
-				}
-			
-			}
-		}
-		f_close(&wave_file);
-	}
-	
+	LPC_GPDMACH5->DMACCDestAddr = &(LPC_I2S->I2STXFIFO);	//Set destination Address of I2S TX fifo
+	LPC_GPDMACH5->DMACCSrcAddr = array;		//Set source address as array 1 for audio
+	LPC_GPDMACH5->DMACCControl = (8 << 0) | //Set the transfer size to eight
+				(0x02 << 12) | //Source burst size (0)
+				(0x02 << 15) | //Destination burst size (0)
+				(0x02 << 18) | //Source transfer width 32 bits
+				(0x02 << 21) | //Destination transfer width 32 bits
+				(0x01 << 26) | //Source address is incremented after each transfer
+				(0x00 << 27) | //Destination address is not incremented after each transfer
+				(0x01 << 31); //Enable terminal count interrupt
+	LPC_GPDMACH5->DMACCConfig = ( 1 << 0) | //Enable the channel (Shold be enabled by I2S configuration)
+				(0x05 << 6) | //Destination peripheral I2SCh0
+				(0x01 << 11)|//Tranfer type is memory to peripherial
+				(0x03 << 14);
+	LPC_GPDMA->DMACConfig = (1 << 0) ; //Enable DMA controller	
 
 }
-void vAudioTask(void * pvParameters)
+void DMA_IRQHandler(void)
 {
-	long int left, right;
-	uint16_t volume;
-	int i = 0;
-	char str[64];
-	I2Ssettings data;
-	lineData output;
-	lineInQueue = xQueueCreate(2, sizeof(lineData));
-	audioControl = xQueueCreate(1, sizeof(uint16_t));
-	settings = xQueueCreate(1, sizeof(I2Ssettings));
-	if(lineInQueue != NULL)
-		MESSAGE("Queue Created Successfully\n\r");
+	static uint8_t arraynumber=1;
+	static int rx_index = 0;
+	uint32_t fretval;
+	uint32_t bytes_read;
+	uint8_t i;
+	uint8_t audioSamples[32];
+	portBASE_TYPE xHigherPriorityTaskWoken;
+	LPC_GPIO2->FIOPIN |= ( 1 << 12);	
+	if(LPC_GPDMA->DMACIntStat & (1 << 5)) //If we have an I2SCh0 interrupt
+	{
+		if(LPC_GPDMA->DMACIntTCStat & (1 << 5)) //We have an active terminal count request
+		{
+			LPC_GPDMA->DMACIntTCClear |= ( 1 << 5); //Clear Ch5 TC interrupt
+			xSemaphoreGiveFromISR(dmaRequest, &xHigherPriorityTaskWoken);	
+		}
+		else
+		{
+			printf("We had a DMA error occur on the transmit channel\n\r");
+			while(1);
+		}
+	
+	}
+	LPC_GPIO2->FIOPIN &= ~( 1 << 12);	
+	portEND_SWITCHING_ISR(xHigherPriorityTaskWoken);
+
+}
+void DMAinit()
+{
+	LPC_SC->PCONP |= (1 << 29); //Power on GPDMA
+	LPC_GPDMA->DMACIntTCClear = 0xFF; //Clear pending terminal count interrupt requests
+	LPC_GPDMA->DMACIntErrClr = 0x0FF; //Clear pending error interrupt requests
+	LPC_GPDMA->DMACSync = 0x0000; //Enable hardware synchronization
+	LPC_GPDMACH5->DMACCDestAddr = &(LPC_I2S->I2STXFIFO);	//Set destination Address of I2S TX fifo
+	LPC_GPDMACH5->DMACCSrcAddr = &audio1[0];		//Set source address as array 1 for audio
+	LPC_GPDMACH5->DMACCControl = (8 << 0) | //Set the transfer size to 8
+					(0x02 << 12) | //Source burst size (8)
+					(0x02 << 15) | //Destination burst size (8)
+					(0x02 << 18) | //Source transfer width 32 bits
+					(0x02 << 21) | //Destination transfer width 32 bits
+					(0x01 << 26) | //Source address is incremented after each transfer
+					(0x00 << 27) | //Destination address is not incremented after each transfer
+					(0x01 << 31); //Enable terminal count interrupt
+	LPC_GPDMACH5->DMACCConfig = ( 1 << 0) | //Enable the channel (Should be enabled by I2S configuration)
+					(0x05 << 6) | //Destination peripheral I2SCh0
+					(0x01 << 11)| //Tranfer type is memory to peripherial
+					(0x03 << 14); //Enable interrupt masks
+	
+	LPC_GPDMACH6->DMACCDestAddr = receiveAudio;
+	LPC_GPDMACH6->DMACCSrcAddr = &(LPC_I2S->I2SRXFIFO);
+	LPC_GPDMACH6->DMACCControl = (8 << 0)	| //Transfer size to 8
+				(0x02 << 12)	| //Source burst size = 8
+				(0x02 << 15)	| //Destination burst size = 8
+				(0x02 << 18)	| //Source transfer width 32 bits
+				(0x02 << 21)	| //Destination transfer width 32 bits
+				(0x00 << 26)	| //Source is not incremented after transfer
+				(0x01 << 27)	| //Destination is incremented after transfer
+				(0x01 << 31);	  //Terminal count interrupt enabled
+	LPC_GPDMACH6->DMACCConfig = (1 << 0)	| //Enable the channel
+				(0x06 << 1)	| //Source peripherial I2SCh1
+				(0x00 << 6)	| //Dest peripherial memory
+				(0x02 << 11)	| //Transfer type is peripherial to memory
+				(0x03 << 14);	//Enable interrupt masks (enables interrupt)
+	LPC_GPDMA->DMACConfig = (1 << 0) ; //Enable DMA controller	
+	
+	NVIC_EnableIRQ(DMA_IRQn);
+}
+void enableI2SRXDMA()
+{
+	LPC_I2S->I2SDMA2 |= (1 << 0) | (8 << 8); //Enable dma2 for receive, trigger on 8 samples.
+}
+void enableI2STXDMA()
+{
+	LPC_I2S->I2SDMA1 |= (1 << 1) | //Enable DMA1 for transmit
+				(1 << 16); //Trigger on TX FIFO = 1
+}
+void disableI2STXDMA()
+{
+	LPC_I2S->I2SDMA1 &= ~((1 << 1) | (1 << 16));
+
+}
+uint32_t samplesToWord(uint8_t* samples)
+{
+	return (samples[3] << 24) | (samples[2] << 16) | (samples[1] << 8) | ( samples[0]);
+}
+void preserve_config(uint8_t load)
+{
+	static uint32_t CR0=0,CR1=0, DR=0, SR=0,CPSR=0,IMSC=0, RIS=0, MIS=0, ICR=0, DMACR=0, PCLK=0;
+	
+	if(load)
+	{
+		
+		LPC_SC->PCLKSEL1 = PCLK;
+		LPC_SSP0->CR0 = CR0;
+		LPC_SSP0->CR1 = CR1;
+		LPC_SSP0->CPSR = CPSR;
+
+	}
 	else
-		MESSAGE("Queue failed to be created\n\r");
-//	vAudioInit(8,1,1,3,2,32);
-	vAudioInit(8,64,125,24,2,8);
-	AudioReadReg(0x20);
-	MESSAGE("Entering main audio task\n\r");	
-	readWaveFile("test.wav");
-	while(1);
+	{
+		CR0 = LPC_SSP0->CR0;
+		CR1 = LPC_SSP0->CR1;
+		CPSR = LPC_SSP0->CPSR;
+		PCLK = LPC_SC->PCLKSEL1;
+	}
+}
+void vAudioInit()
+{
+	audio_init();
+	mcp_init(0);
+	l3init();
+	I2Sinit();
+	uda1345TS_init();
+	static_pin_init();
+	DMAinit();
+
+}
+void vAudioTask(void * pvParam)
+{
+	uint32_t return_value;
+	uint8_t audioSamples[32];
+	uint32_t wave_header[44];
+	uint32_t bytes_read;
+	uint32_t audioIndex = 0;
+	const char filename[21];
+	uint32_t i;
+	uint8_t audioCh = 1;
+	xSemaphoreTake(dmaRequest, portMAX_DELAY);
+	
+	xQueueReceive(audioControlQueue, (const char*) filename, portMAX_DELAY); //Block until there is a file ready
+
+	
+	return_value = f_open(&audioFile, filename, FA_READ|FA_OPEN_EXISTING); //Open the file passed from the queue
+//	if(audioFile == NULL)
+//	{
+//		printf("f_open in vAudioTask failed, return code: ");
+//		put_rc(return_value);
+//		printf("\n\r");
+//		f_close(&audioFile);
+//		f_open(&audioFile, filename, FA_READ|FA_OPEN_EXISTING);
+//	}
+
+	return_value = f_read(&audioFile, wave_header, 44, &bytes_read);
+	if(return_value != FR_OK || bytes_read != 44)
+	{
+		printf("f_read in vAudioTask failed, return code: ");
+		put_rc(return_value);
+		printf(" bytes read: %u\n\r", bytes_read);
+	}	
+	return_value = f_read(&audioFile, audioSamples, 32, &bytes_read);
+	if(return_value != FR_OK || bytes_read != 32)
+	{
+		printf("f_read of audio samples failed, return code: ");
+		put_rc(return_value);
+		printf(" bytes read: %u\n\r", bytes_read);
+	}
+	for(i = 0; i < 32; i++)
+	{
+		audioSamples[i] = unsignedtosigned(audioSamples[i]);
+	}
+	for(i = 0; i <  8; i++)
+	{
+		audio1[i] = samplesToWord(&audioSamples[i*4]);
+	}
+	audioCh = 1;
+	SetCh5DMA(audio1);	
 	while(1)
 	{
-		if(uxQueueMessagesWaiting(audioControl) > 0)
+		
+		enableI2STXDMA();
+		enableI2SOutput();
+		xSemaphoreTake(dmaRequest, portMAX_DELAY); //Wait until DMA request occurs
+		if(audioCh == 2)
 		{
-			xQueueReceive(audioControl, &volume, 0);
-			vVolumeControl(volume); 
-		}
-		if(uxQueueMessagesWaiting(settings) > 0)
-		{
-			xQueueReceive(settings, &data, 0);
-			vAudioInit(data.Pclk_Div, data.x, data.y, data.tx_bitrate, data.nChan, data.bw);
-			MESSAGE("Pclk: %u, x: %u, y: %u, tx_br: %u, nchan: %u, bw: %u\n\r", data.Pclk_Div, data.x, data.y,  data.tx_bitrate, data.nChan, data.bw);
-		}
-		if(uxQueueMessagesWaiting(lineInQueue) > 0)
-		{
-			xQueueReceive(lineInQueue, &output, 0);
-			i = 0;
-			while(i < output.depth)
+			audioCh = 1;		//Start filling array 2
+			SetCh5DMA(audio1);	//Set DMA to use audio1 as data source
+			
+			if(!f_eof(&audioFile))	//If we aren't at the end of the file
 			{
-				left = output.left[i];
-				right = output.right[i++];	
-				LPC_GPIO1->FIOPIN ^= LED3;		
-				LPC_I2S->I2STXFIFO = left;
-				LPC_I2S->I2STXFIFO = right;
+				
+				return_value = f_read(&audioFile, audioSamples, 32, &bytes_read);	//Read some samples
+				if(return_value != FR_OK || bytes_read != 32)
+				{
+					printf("f_read failed, return code: ");
+					put_rc(return_value);
+					printf("bytes read : %u\n\r", bytes_read);
+				} 
+				for(i=0; i < 32; i++)
+				{
+					audioSamples[i] = unsignedtosigned(audioSamples[i]);
+				}	
+				for(i=0; i < 8; i++)
+				{
+					audio2[i] = samplesToWord(&audioSamples[i*4]);
+				}
+		
 			}
+			else	//If we are at the end of the file
+			{
+				disableI2SOutput();
+				disableI2STXDMA();
+				printf("End of file\n\r");
+				f_close(&audioFile);
+				xQueueReceive(audioControlQueue, (const char*) filename, portMAX_DELAY); //Block until there is a file ready
+				return_value = f_open(&audioFile, filename, FA_READ|FA_OPEN_EXISTING); //Open the file passed from the queue
+				if(return_value != FR_OK)
+				{
+					printf("f_open in vAudioTask failed, return code: ");
+					put_rc(return_value);
+					printf("\n\r");
+				}
+
+				return_value = f_read(&audioFile, wave_header, 44, &bytes_read);
+				if(return_value != FR_OK || bytes_read != 44)
+				{
+					printf("f_read in vAudioTask failed, return code: ");
+					put_rc(return_value);
+					printf(" bytes read: %u\n\r", bytes_read);
+				}	
+				return_value = f_read(&audioFile, audioSamples, 32, &bytes_read);
+				if(return_value != FR_OK || bytes_read != 32)
+				{
+					printf("f_read of audio samples failed, return code: ");
+					put_rc(return_value);
+					printf(" bytes read: %u\n\r", bytes_read);
+				}
+				for(i = 0; i < 32; i++)
+				{
+					audioSamples[i] = unsignedtosigned(audioSamples[i]);
+				}
+				for(i = 0; i <  8; i++)
+				{
+					audio2[i] = samplesToWord(&audioSamples[i*4]);
+				}
+			}
+		}
+		else	//audioCh == 1
+		{
+			audioCh = 2;		//Set to array2, fill array 1
+			SetCh5DMA(audio2);	//Set DMA to use audio2 as data source
+			if(!f_eof(&audioFile))	//If we aren't at the end of the file
+			{
+				return_value = f_read(&audioFile, audioSamples, 32, &bytes_read);	//Read some samples
+				if(return_value != FR_OK || bytes_read != 32)
+				{
+					printf("f_read failed, return code: ");
+					put_rc(return_value);
+					printf("bytes read : %u\n\r", bytes_read);
+				} 
+				for(i=0; i < 32; i++)
+				{
+					audioSamples[i] = unsignedtosigned(audioSamples[i]);
+				}	
+				for(i=0; i < 8; i++)
+				{
+					audio1[i] = samplesToWord(&audioSamples[i*4]);
+				}
+			}
+			else	//If we are at the end of the file
+			{
+				disableI2SOutput();
+				disableI2STXDMA();
+				f_close(&audioFile);
+				printf("File closed\n\r");
+				xQueueReceive(audioControlQueue, (const char*) filename, portMAX_DELAY); //Block until there is a file ready
+				return_value = f_open(&audioFile, filename, FA_READ|FA_OPEN_EXISTING); //Open the file passed from the queue
+				if(return_value != FR_OK)
+				{
+					printf("f_open in vAudioTask failed, return code: ");
+					put_rc(return_value);
+					printf("\n\r");
+				}
+
+				return_value = f_read(&audioFile, wave_header, 44, &bytes_read);
+				if(return_value != FR_OK || bytes_read != 44)
+				{
+					printf("f_read in vAudioTask failed, return code: ");
+					put_rc(return_value);
+					printf(" bytes read: %u\n\r", bytes_read);
+				}	
+				return_value = f_read(&audioFile, audioSamples, 32, &bytes_read);
+				if(return_value != FR_OK || bytes_read != 32)
+				{
+					printf("f_read of audio samples failed, return code: ");
+					put_rc(return_value);
+					printf(" bytes read: %u\n\r", bytes_read);
+				}
+				for(i = 0; i < 32; i++)
+				{
+					audioSamples[i] = unsignedtosigned(audioSamples[i]);
+				}
+				for(i = 0; i <  8; i++)
+				{
+					audio1[i] = samplesToWord(&audioSamples[i*4]);
+				}
+			}
+
+		}
+	}
+}
+void vAudioTask2(void * pvParam)
+{
+	uint32_t return_value;
+	uint32_t wave_header[44];
+	uint32_t bytes_read;
+	uint8_t audioSamples[32];
+	const char filename[21];
+	uint32_t i;
+//	if(xSemaphoreGive(audioBusy) != pdTRUE)
+//	{
+//		printf("Failed to give audioBusy Semaphore\n\r");
+//	}
+	xSemaphoreTake(audioBusy, portMAX_DELAY);
+	while(1)
+	{
+		xQueueReceive(audioControlQueue, (const char*) filename, portMAX_DELAY); //Block until there is a file ready
+		{
+			return_value = f_open(&audioFile, filename, FA_READ|FA_OPEN_EXISTING);
+	
+			if(return_value != FR_OK)
+			{
+				printf("f_open in vAudioTask failed, return code: ");
+				put_rc(return_value);
+				printf("\n\r");
+			}
+	
+			return_value = f_read(&audioFile, wave_header, 44, &bytes_read);
+			if(return_value != FR_OK || bytes_read != 44)
+			{
+				printf("f_read in vAudioTask failed, return code: ");
+				put_rc(return_value);
+				printf(" bytes read: %u\n\r", bytes_read);
+			}	
+			return_value = f_read(&audioFile, audioSamples, 32, &bytes_read);
+			if(return_value != FR_OK || bytes_read != 32)
+			{
+				printf("f_read of audio samples failed, return code: ");
+				put_rc(return_value);
+				printf(" bytes read: %u\n\r", bytes_read);
+			}
+			for(i = 0; i < 32; i++)
+			{
+				audioSamples[i] = unsignedtosigned(audioSamples[i]);
+			}
+			for(i = 0; i < 8; i++)
+			{
+				audio1[i] = samplesToWord(&audioSamples[i*4]);
+			}
+			enableI2STXDMA();
+			enableI2SOutput();
+			xSemaphoreTake(audioBusy, portMAX_DELAY);
+			if(f_close(&audioFile) != FR_OK)
+				printf("error closing the file\n\r");
+			printf("closed the file\n\r");	
 		}
 		
 	}
+}
+void wordToSamples(uint32_t word, uint8_t * samples)
+{
+	samples[0] = (word & 0x000000FF) >> 0;
+	samples[1] = (word & 0x0000FF00) >> 8;
+	samples[2] = (word & 0x00FF0000) >> 16;
+	samples[3] = (word & 0xFF000000) >> 24;
 
 }
+void vAudioRXTask(void * pvParam)
+{
+	uint32_t rx_array[8];
+	uint32_t trx[8];
+	uint8_t tbrx[32];
+	uint8_t i;
+	for(i = 0; i < 8; i++)
+	{
+		receiveAudio[i] = 0x0;		
+		trx[i] = 0x0;
+		tbrx[i] = 0;
+	}
+	enableI2SInput();
+	enableI2SRXDMA();
+	while(1)
+	{
+		xQueueReceive(audioRXQueue, rx_array, portMAX_DELAY);
+		for(i = 0; i < 8; i++)
+			trx[i] = rx_array[i];
+		for(i = 0; i < 8; i++)
+		{
+			wordToSamples(trx[i], &tbrx[i*4]);
+			printf("trx[%u] = 0x%x\n\r", i, trx[i]);
+		}
+		
+	}
+}	
