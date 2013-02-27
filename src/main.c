@@ -17,6 +17,7 @@
 #include "audio.h"
 #include "pwm.h"
 #include "filesystem.h"
+#include "rtc.h"
 #define _VOLUMES 1
 uint32_t SystemCoreClock;
 extern FATFS Fatfs[_VOLUMES];
@@ -29,7 +30,8 @@ extern uint32_t audio1[8], audio2[8];
 extern xQueueHandle audioControlQueue;
 extern xQueueHandle audioRXQueue;
 extern xSemaphoreHandle audioBusy;
-extern xSemaphoreHandle dmaRequest;
+extern xSemaphoreHandle I2STX_Request;
+extern xSemaphoreHandle I2SRX_Request;
 uint32_t CCLK_FREQ;
 volatile int ITM_RxBuffer;
 xTimerHandle xTimers[NUM_TIMERS];
@@ -63,6 +65,10 @@ void _init()
 	LPC_GPIO0->FIODIR &= ~(1 << 0);
 	LPC_PINCON->PINSEL3 |= (1 << 22) ;  // CLKOUT pin selection	
 	UART0_Init(115200);
+//	if(setRTC(0, 15, 14, 26, 2, 57, 2, 2013))
+//		printf("RTC was set\n\r");
+//	else
+//		printf("RTC was not set\n\r");	
 	printf("initalization routine completed, calling main\n\r");
 }
 void vAudioStim(void * pvParam)
@@ -77,8 +83,9 @@ void vAudioStim(void * pvParam)
 int main(void) 
 {
 	int retval = 0;
+	RTC_time t1;		
 	apb_station_config_t sc;
-	audioControlQueue = xQueueCreate(1, 20); //Create a queue of length 1, 20 bytes wide
+	audioControlQueue = xQueueCreate(3, 20); //Create a queue of length 1, 20 bytes wide
 	if(audioControlQueue == NULL)
 	{
 		printf("Failed to create audio command queue\n\r");
@@ -87,7 +94,7 @@ int main(void)
 	{
 		printf("Succesfully created audio command queue\n\r");
 	}
-	audioRXQueue = xQueueCreate(4, 4);  //Create a queue of length 4, each 4 bytes wide (1 word)
+	audioRXQueue = xQueueCreate(4, 16);  //Create a queue of length 4, each 4 bytes wide (1 word)
 	if(audioRXQueue == NULL)
 	{	
 		printf("Failed to create audio receive queue\n\r");
@@ -105,16 +112,24 @@ int main(void)
 	{
 		printf("Sucessfully created audioBusy Semaphore\n\r");
 	}
-	vSemaphoreCreateBinary(dmaRequest);
-	if(dmaRequest == NULL)
+	vSemaphoreCreateBinary(I2STX_Request);
+	if(I2STX_Request == NULL)
 	{
-		printf("Failed to create dmaRequest Semaphore\n\r");
+		printf("Failed to create I2STX_Request Semaphore\n\r");
 	}
 	else
 	{
-		printf("Sucessfully created dmaRequest Semaphore\n\r");
+		printf("Sucessfully created T2STX_Request Semaphore\n\r");
 	}
-	
+	vSemaphoreCreateBinary(I2SRX_Request);
+	if( I2SRX_Request == NULL)
+	{
+		printf("Failed to create I2SRX_Request Semaphore\n\r");
+	}	
+	else
+	{
+		printf("Sucessfully created I2SRX_Request Semaphore\n\r");
+	}
 	LPC_GPIO1->FIODIR |= (1 << 21);
 	LPC_GPIO1->FIOSET |= (1 << 21);
 	vAudioInit();
@@ -123,14 +138,17 @@ int main(void)
 
 	retval = f_mount(0, &Fatfs[0]);
 	printf("filesystem f_mount return value: ");
-	put_rc(retval); printf("\n\r");
-	//Create some timers
+	put_rc(retval);
+	printf("\n\r");
+	
+
 //	apbconfig_load(&sc, "config.cfg");
-
-
+//	t1 = readRTC();
+//	printf("RTC: %u:%u:%u %u/%u/%u\n\r", t1.hours, t1.minutes, t1.seconds, t1.month, t1.DOM, t1.year);
 
 	xTaskCreate(vAudioStim, "a2", 230, NULL,0,NULL);
-	xTaskCreate(vAudioTask, "audio", 240, NULL, 1, NULL);	
+	xTaskCreate(vAudioTask, "audio", 240, NULL, 0, NULL);	
+//	xTaskCreate(vAudioRXTask, "rxau", 240, NULL, 0, NULL);
 	vTaskStartScheduler();
 	MESSAGE("Scheduler didn't start\n\r");
 	for(;;);

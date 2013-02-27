@@ -9,6 +9,8 @@
 #include "uart0.h"
 #include "ff.h"
 #include "filesystem.h"
+#include "l3.h"
+
 #include "audio.h"
 /**
 *	@file audio.c
@@ -22,7 +24,8 @@
 xQueueHandle audioControlQueue = NULL;	/*!< Queue for Audio Control*/
 xQueueHandle audioRXQueue = NULL;	/*!< Queue for Audio Rx*/		
 xSemaphoreHandle audioBusy = NULL;	/*!< Semaphore indicating if the audio subsystem is currently busy*/
-xSemaphoreHandle dmaRequest = NULL;	/*!< Mutex for deferred ISR processing*/	 
+xSemaphoreHandle I2STX_Request = NULL;	/*!< Mutex for deferred I2S ISR processing (TX)*/	 
+xSemaphoreHandle I2SRX_Request = NULL;  /*!< Mutex for deffered I2S ISR processing (RX)*/ 
 FIL audioFile, fp2;			/*!< File pointers for file handles*/  
 uint32_t receiveAudio[8]; 
 uint32_t audio1[8], audio2[8];		/*!< DMA audio sample memory locations */ 
@@ -67,143 +70,6 @@ void audio_init()
 
 
 }
-/**
-*	This function initializes the mode control pins for the UDA1345TS.  
-*	
-*	NOTES:	
-*	MC1 is on P2.2, MC1 is on P2.1
-*	MC1|MC2|Function
-*	 0 | 0 | L3MODE
-*	 0 | 1 | TEST
-*	 1 | 0 | TEST
-*	 1 | 1 | Static Pin mode
-*	@author Kyle Swenson
-*	@date 26 FEB 2013
-*/
-void mcp_init(uint8_t static_mode)
-{
-	LPC_GPIO2->FIODIR |= ( 1 << 2)|(1 << 1);
-	LPC_GPIO2->FIOCLR |= (1 << 2)|(1 << 1);	//SET l3mode
-	if(static_mode)
-		LPC_GPIO2->FIOSET |= (1 << 2)|(1 << 1);	//SET static pin mode
-
-}
-/**START FUNCTION DESCRIPTION
-static_pin_init			<main.c>
-SYNTAX:				void static_pin_init();
-KEYWORDS:			static pin init, initalization
-DESCRIPTION:			Sets static pin modes for all static pins
-RETURN VALUE:			None.
-NOTES:	
-	MP1 is on P0.4
-	MP2 is on P1.22
-	MP3 is on P1.20
-	MP4 is on P1.24
-	MP5 is on P0.5
-	
-	MP1 and MP5 control data input format
-		MP1 | MP5 | Function
-		0	0	MSB-Justified
-		0	1	I2S-Bus
-		1	0	MSB output LSB 20 bit input
-		1	1	MSB output LSB 16 bit input
-	MP2 controls Demphasis and Mute
-		0	No de-emphasis and mute
-		.5VDD	De-emphasis at 44.1kHz
-		1	Mutes
-	MP3 controls system clock frequency
-		0	256Fs
-		1	384Fs
-	MP4 Controls ADC mode
-		0	ADC Power-Down mode
-		.5VDD	6dB gain mode
-		1	0dB gain mode
-*/
-void static_pin_init()
-{
-	LPC_PINCON->PINSEL0 &= ~((3 << 8)|(3 << 10));
-	LPC_PINCON->PINSEL3 &= ~((3 << 8)|(3 << 12)|(3 << 16));
-	LPC_GPIO0->FIODIR = (1 << 4) | (1 << 5);
-	LPC_GPIO1->FIODIR = (1 << 22) | ( 1 << 20) | (1 << 24);
-	LPC_GPIO0->FIOCLR = ( 1 << 4);		//Set I2S Bus as input
-	LPC_GPIO0->FIOSET = (1 << 5);		//Set I2S Bus as input
-	LPC_GPIO1->FIOCLR = (1 << 20) | (1 << 22);
-	LPC_GPIO1->FIOSET = ( 1 << 24)|(1 << 20);// | (1 << 22); //384Fs, ADC in 0dB gain
-}
-/**START FUNCTION DESCRIPTION
-l3init				<main.c>
-SYNTAX:				void l3init()
-KEYWORDS:			L3 bus initalization
-DESCRIPTION:			Initalizes pins and SSP0 for L3 Bus function 
-RETURN VALUE:			None.
-NOTES:	
-	Sets the L3Bus for a 2 MhZ clock, 8 bit data transfer.  
-	The L3Bus has the clock polarity high between frames.
-	The SD card is on the SSP0 bus as well, and uses different parameters.  
-	The SSP0 is first configured here, then reconfigured when the filesystem is mounted.	
-*/
-void l3init()
-{
-	
-	LPC_SC->PCLKSEL1 &= ~(0x03 << 10);
-	LPC_SC->PCLKSEL1 |= ( 0x02 << 10); 	//cclk/1
-	LPC_SSP0->CPSR = 50; 			//2 MHz clock
-	LPC_SSP0->CR0 = (0x07) | 		//8 bit data transfer
-			(0x00 << 4) | 		//SPI format
-			(1 << 6) | 		//Clock polarity high between frames
-			(1 << 7) ; 		//
-	LPC_SSP0->CR1 = 0x02;			//Enable SSP
-
-}	
-void l3SendCmd(uint8_t address, uint8_t data)
-{
-	#define SETL3MODE {LPC_GPIO1->FIOPIN |= (1 << 22);}
-	#define CLRL3MODE {LPC_GPIO1->FIOPIN &= ~(1 << 22);}
-	uint8_t i;
-	LPC_GPIO1->FIOPIN |= (1 << 21);
-	SETL3MODE
-	for(i=0;i<0xFF;i++);
-	CLRL3MODE
-	LPC_SSP0->DR = address;
-	while(LPC_SSP0->SR & (1 << 4));	
-	SETL3MODE
-	CLRL3MODE
-	CLRL3MODE
-	SETL3MODE
-	LPC_SSP0->DR = data;
-	while(LPC_SSP0->SR & (1 << 4));
-	for(i=0;i<0x07;i++);
-	CLRL3MODE
-}	
-
-/**START FUNCTION DESCRIPTION
-uda1345TS_init			<main.c>
-SYNTAX:				void usa1345TS_init()
-KEYWORDS:			L3 bus, UDA1345 L3Bus initalization
-DESCRIPTION:			Uses the L3 Bus to initalize the UDA1345TS
-RETURN VALUE:			None.
-NOTES:				Doesn't work, using static pin mode instead	
-*/
-void uda1345TS_init()
-{
-	l3SendCmd(0b00101000, 0b00000000); //Set volume to max
-	l3SendCmd(0b00101000, 0b00000001); //De-Emphasis and MuTe off
-	l3SendCmd(0b00101000, 0b11000011);	//Power control (Turn everything on)
-	l3SendCmd(0b01101000, 0b00001000);	//384*fs, I2S bus, DC filter
-	l3SendCmd(0b00000000, 0b00000000);	//Send an invalid address	
-}
-
-/* START FUNCTION DESCRIPTION
-I2Sinit					<main.c>
-SYNTAX:		void I2Sinit();
-KEYWORDS:	Init I2S Bus
-DESCRIPTION:	Initializes I2S bus for UDA1345TS communication
-RETURN VALUE:	None
-NOTES:	
-	Sets the I2S Bus for 8 bit samples at 16kHz.  
-	The SYSCLK is operating at 384Fs.
-	The BCLK is operating at 16kHz*8bits/sample*2 channels = 256 kHz
-*/
 void I2Sinit()
 {
 	LPC_SC->PCONP |= (1 << 27);		//Power up
@@ -270,6 +136,12 @@ void disableI2SInput()
 	LPC_I2S->I2SDAI |= (1 << 4); //enable reset and stop modes
 
 }
+void enableI2SRxInterrupt()
+{
+	LPC_I2S->I2SIRQ = (1 << 0) |	//Enable RX interrupt
+			(4 << 8);	//Trigger on 4 samples
+	NVIC_EnableIRQ(I2S_IRQn);
+}
 /* START FUNCTION DESCRIPTION
 unsignedtosigned					<main.c>
 SYNTAX:		uint8_t unsignedtosigned(uint8_t us)	
@@ -327,7 +199,7 @@ void DMA_IRQHandler(void)
 		if(LPC_GPDMA->DMACIntTCStat & (1 << 5)) //We have an active terminal count request
 		{
 			LPC_GPDMA->DMACIntTCClear |= ( 1 << 5); //Clear Ch5 TC interrupt
-			xSemaphoreGiveFromISR(dmaRequest, &xHigherPriorityTaskWoken);	
+			xSemaphoreGiveFromISR(I2STX_Request, &xHigherPriorityTaskWoken);	
 		}
 		else
 		{
@@ -336,6 +208,15 @@ void DMA_IRQHandler(void)
 		}
 	
 	}
+//	if(LPC_GPDMA->DMACIntStat & (1 << 6)) //We have an I2SCh0 interrupt
+////	{
+//		if(LPC_GPDMA->DMACIntTCClear & (1 << 6)) //We have an active terminal count request
+//		{
+//			LPC_GPDMA->DMACIntTCClear |= (1 << 6);
+//			xQueueSendFromISR(audioRXQueue, audioRXQueue, &xHigherPriorityTaskWoken);
+//		}
+//
+//	}
 	LPC_GPIO2->FIOPIN &= ~( 1 << 12);	
 	portEND_SWITCHING_ISR(xHigherPriorityTaskWoken);
 
@@ -440,7 +321,7 @@ void vAudioTask(void * pvParam)
 	const char filename[21];
 	uint32_t i;
 	uint8_t audioCh = 1;
-	xSemaphoreTake(dmaRequest, portMAX_DELAY);
+	xSemaphoreTake(I2STX_Request, portMAX_DELAY);
 	
 	xQueueReceive(audioControlQueue, (const char*) filename, portMAX_DELAY); //Block until there is a file ready
 
@@ -484,7 +365,7 @@ void vAudioTask(void * pvParam)
 		
 		enableI2STXDMA();
 		enableI2SOutput();
-		xSemaphoreTake(dmaRequest, portMAX_DELAY); //Wait until DMA request occurs
+		xSemaphoreTake(I2STX_Request, portMAX_DELAY); //Wait until DMA request occurs
 		if(audioCh == 2)
 		{
 			audioCh = 1;		//Start filling array 2
@@ -679,11 +560,37 @@ void wordToSamples(uint32_t word, uint8_t * samples)
 	samples[3] = (word & 0xFF000000) >> 24;
 
 }
+void I2S_IRQHandler()
+{
+	uint32_t rx_array[4];
+	uint8_t i;
+	portBASE_TYPE pxHigherPriorityTaskWoken;
+	if(LPC_I2S->I2SSTATE & 0x01) //We have an I2S interrupt
+	{
+		for(i=0; i < 4; i++)
+		{
+			if(LPC_I2S->I2SSTATE & (0x0F << 8)) //Make sure we have stuff to get
+			{
+				rx_array[i] = LPC_I2S->I2SRXFIFO;
+			}
+			else
+			{
+				printf("Error in I2S RX IRQ (Ran out of words to get\n\r");
+
+			}
+
+		}
+		xQueueSendFromISR(audioRXQueue, rx_array, pxHigherPriorityTaskWoken);
+	}
+	
+}
+
 void vAudioRXTask(void * pvParam)
 {
 	uint32_t rx_array[8];
 	uint32_t trx[8];
-	uint8_t tbrx[32];
+	uint8_t tbrx[16];
+	uint32_t average;
 	uint8_t i;
 	for(i = 0; i < 8; i++)
 	{
@@ -692,17 +599,21 @@ void vAudioRXTask(void * pvParam)
 		tbrx[i] = 0;
 	}
 	enableI2SInput();
-	enableI2SRXDMA();
+	enableI2SRxInterrupt();
+	
+
+//	enableI2SInput();
+//	enableI2SRXDMA();
 	while(1)
 	{
 		xQueueReceive(audioRXQueue, rx_array, portMAX_DELAY);
-		for(i = 0; i < 8; i++)
+		for(i = 0; i < 4; i++)
 			trx[i] = rx_array[i];
-		for(i = 0; i < 8; i++)
+		for(i = 0; i < 4; i++)
 		{
 			wordToSamples(trx[i], &tbrx[i*4]);
-			printf("trx[%u] = 0x%x\n\r", i, trx[i]);
 		}
-		
+		for(i=0; i < 16; i++)
+			printf("tbrx[%u] = %u\n\r", i, tbrx[i]);	
 	}
 }	
