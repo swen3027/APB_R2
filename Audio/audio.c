@@ -70,6 +70,17 @@ void audio_init()
 
 
 }
+/* START FUNCTION DESCRIPTION
+I2Sinit					<main.c>
+SYNTAX:		void I2Sinit();
+KEYWORDS:	Init I2S Bus
+DESCRIPTION:	Initializes I2S bus for UDA1345TS communication
+RETURN VALUE:	None
+NOTES:	
+	Sets the I2S Bus for 8 bit samples at 16kHz.  
+	The SYSCLK is operating at 384Fs.
+	The BCLK is operating at 16kHz*8bits/sample*2 channels = 256 kHz
+*/
 void I2Sinit()
 {
 	LPC_SC->PCONP |= (1 << 27);		//Power up
